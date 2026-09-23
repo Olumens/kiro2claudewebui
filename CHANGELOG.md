@@ -1,3 +1,12 @@
+# [1.9.0](https://github.com/yupanzi/kiro2claude/compare/v1.8.0...v1.9.0) (2026-09-23)
+
+
+### Features
+
+* **core:** 上游 wire 对齐 kiro-cli V3(KAS),subagent 按独立会话映射 ([864346e](https://github.com/yupanzi/kiro2claude/commit/864346e9f4b6ace09605b823fc7c1a7027c12ef3))
+* **openai:** 会话 id 按客户端会话派生,Responses 推理经 encrypted_content 往返 ([3f406af](https://github.com/yupanzi/kiro2claude/commit/3f406af1f3dc0deba3cafad9110f586778e21a89))
+* **plugin-derived:** GPT 缓存命中由 credits 反演 ([cf17c8d](https://github.com/yupanzi/kiro2claude/commit/cf17c8d68bd4dcb7fdd5a2fcd63d69c37a19c924))
+
 # [1.8.0](https://github.com/yupanzi/kiro2claude/compare/v1.7.0...v1.8.0) (2026-09-23)
 
 
