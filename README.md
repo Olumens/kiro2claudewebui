@@ -134,6 +134,7 @@ pnpm workspace,Node ≥ 22 / TypeScript / ES Modules。husky pre-commit 强制 `
 - **continuation 文案偶发进正文**:请求以 assistant 结尾时(prefill 或上轮中断的续接),Kiro 只接受 user 作为当前消息,网关把该 assistant 内容留在历史并追加一句续写指令。实测 7 次里 2 次模型把指令句尾复述进可见输出。相比修复前(prefill 场景 3/3 破损)是净改进,但不到 100%,也不是字节级 prefill。
 - **客户端省略的历史无法还原**:上轮的 thinking、被自动压缩掉的内容不再随请求发来时,网关没有跨请求存储,不擅自复活。Claude Code 自动压缩(实测约第 50 个请求触发)保留主线任务与未完成项,但会丢部分 API 签名、返回结构、错误码拼写等细节。
 - **GPT 加密 reasoning 不可见**:上游只给加密 blob,没有可重放的输入字段,网关不伪装成明文。
+- **Claude Fable 5.1 只对开通的账号可用**:Kiro 只向启用了 model governance 的 Enterprise 组织灰度(仅 `us-east-1`),账号未开通时上游拒收。网关按 Anthropic 规格处理(thinking 常开,`thinking:{type:"disabled"}` 不下发,走上游默认 adaptive);`kiro_derived` 暂不做缓存反演(`unknown_model` 透传:cache 字段为 0、成本按 `credits × 0.04`),待真实 credit 数据校准后再加。
 - **旧模型不做 thinking 控制**:opus-4.6 及以下、haiku 没有原生 reasoning,网关不注入提示词也不发字段,`thinking` / `-thinking` 后缀对它们无效,走上游默认。
 - **无签名的历史 thinking 不回传**:thinking 块要带上游给的 `signature` 才走原生 `reasoningContent`;无签名的(旧模型文本解码、Codex reasoning summary)丢弃,不拼成文本;签名失效时网关剥掉全部历史推理重发一次。
 - **多张图片只能靠位置归属**:Kiro wire 只有消息级 `images[]`,tool_result 里放图上游静默丢弃、正文是纯字符串,所以「这张图属于哪个工具调用」在 wire 上表达不了。网关做了三件事:tool_result 按 tool_use 顺序规范化、tool_result 内占位符带序号、消息里 ≥2 张 tool_result 图时在正文前置一行 `[Attached images, in order: image k = …]` 图例。2026-09-09 真实上游实测:6 个并行 Read 各回一张图,无图例时两个模型 4/4 错位,有图例 4/4 全对;Docker 里真实 Claude Code / Codex 读 4–6 张不同数字图能正确对应文件。仍不可控的是模型自己的判断:GPT-5.6 对两张字节相同的图稳定答「1 张」(token 计数证明两张都送到了),以及对低分辨率点阵数字偶发误读一位。真实复跑:`packages/core/test/manual/multi-image-attribution-probe.mjs`(API)与 `multi-image-cli-probe.mjs`(Docker 真 CLI,计费)。

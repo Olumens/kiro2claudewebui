@@ -155,18 +155,21 @@ const CLAUDE_PRICE_USD_PER_TOK: Record<string, ClaudePrice> = {
     cacheRead: 0.5e-6,
     cacheCreation: 6.25e-6,
   },
+  // claude-fable-5-1 故意不列:Kiro 标 6x,偏离上面各模型「倍率 / 输入单价 ≈ 0.44」的线,
+  // 按标价反演会低估 cache_read。未用真实 credit 校准前走 unknown_model 透传。
 };
 
+/** Anthropic 最小可缓存前缀(prompt-caching 文档,各平台一致);随代际不单调。 */
 const MODEL_CACHE_THRESHOLD: Record<string, number> = {
   'claude-haiku-4-5': 4096,
   'claude-sonnet-4-5': 1024,
-  'claude-sonnet-4-6': 2048,
-  'claude-sonnet-5': 2048,
+  'claude-sonnet-4-6': 1024,
+  'claude-sonnet-5': 1024,
   'claude-opus-4-5': 4096,
   'claude-opus-4-6': 4096,
-  'claude-opus-4-7': 4096,
-  'claude-opus-4-8': 4096,
-  'claude-opus-5': 4096,
+  'claude-opus-4-7': 2048,
+  'claude-opus-4-8': 1024,
+  'claude-opus-5': 512,
 };
 
 /**

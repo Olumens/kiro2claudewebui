@@ -9,6 +9,25 @@ import type { Model, ModelsResponse } from './types.js';
 
 /** Full list of Claude model identifiers exposed by this proxy. */
 export const MODELS: Model[] = [
+  // Kiro Enterprise 预览(model governance 批准后才可用),账号无权限时上游拒收
+  {
+    id: 'claude-fable-5-1',
+    object: 'model',
+    created: 1789516800,
+    owned_by: 'anthropic',
+    display_name: 'Claude Fable 5.1',
+    type: 'chat',
+    max_tokens: 64000,
+  },
+  {
+    id: 'claude-fable-5-1-thinking',
+    object: 'model',
+    created: 1789516800,
+    owned_by: 'anthropic',
+    display_name: 'Claude Fable 5.1 (Thinking)',
+    type: 'chat',
+    max_tokens: 64000,
+  },
   {
     id: 'claude-opus-5',
     object: 'model',

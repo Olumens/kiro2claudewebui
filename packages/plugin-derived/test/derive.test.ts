@@ -256,41 +256,19 @@ describe('deriveKiroUsage — cache threshold gating', () => {
     expect(out.derived.derivedStatus).toMatch(/^ok_/);
   });
 
-  it('Sonnet 4.6 + T_in=2047 → below_threshold', () => {
-    const out = deriveKiroUsage('claude-sonnet-4-6', 2047, 1, 0.01);
-    expect(out.derived.derivedStatus).toBe('below_threshold');
-  });
-
-  it('Sonnet 4.6 + T_in=2048 → enters reverse-engineering', () => {
-    const out = deriveKiroUsage('claude-sonnet-4-6', 2048, 1, 0.005);
-    expect(out.derived.derivedStatus).toMatch(/^ok_/);
-  });
-
-  it('Sonnet 4.5 + T_in=1023 → below_threshold (1024 minimum)', () => {
-    const out = deriveKiroUsage('claude-sonnet-4-5-20250929', 1023, 1, 0.005);
-    expect(out.derived.derivedStatus).toBe('below_threshold');
-  });
-
-  it('Opus 4.7 + T_in=4095 → below_threshold (same as 4.5/4.6)', () => {
-    const out = deriveKiroUsage('claude-opus-4-7', 4095, 1, 0.05);
-    expect(out.derived.derivedStatus).toBe('below_threshold');
-    expect(out.inputTokens).toBe(4095);
-  });
-
-  it('Opus 4.7 + T_in=4096 → enters reverse-engineering', () => {
-    const out = deriveKiroUsage('claude-opus-4-7', 4096, 1, 0.001);
-    expect(out.derived.derivedStatus).toMatch(/^ok_/);
-  });
-
-  it('Opus 5 + T_in=4095 → below_threshold (同 4.5/4.6/4.7/4.8)', () => {
-    const out = deriveKiroUsage('claude-opus-5', 4095, 1, 0.05);
-    expect(out.derived.derivedStatus).toBe('below_threshold');
-    expect(out.inputTokens).toBe(4095);
-  });
-
-  it('Opus 5 + T_in=4096 → enters reverse-engineering', () => {
-    const out = deriveKiroUsage('claude-opus-5', 4096, 1, 0.001);
-    expect(out.derived.derivedStatus).toMatch(/^ok_/);
+  // [model, threshold, 进入反演时用的 credits];阈值随代际不单调
+  it.each([
+    ['claude-sonnet-4-5-20250929', 1024, 0.001],
+    ['claude-sonnet-4-6', 1024, 0.005],
+    ['claude-sonnet-5', 1024, 0.001],
+    ['claude-opus-4-7', 2048, 0.001],
+    ['claude-opus-4-8', 1024, 0.001],
+    ['claude-opus-5', 512, 0.001],
+  ] as const)('%s: T_in=%i-1 → below_threshold,T_in=%i → 进入反演', (model, threshold, credits) => {
+    const below = deriveKiroUsage(model, threshold - 1, 1, 0.05);
+    expect(below.derived.derivedStatus).toBe('below_threshold');
+    expect(below.inputTokens).toBe(threshold - 1);
+    expect(deriveKiroUsage(model, threshold, 1, credits).derived.derivedStatus).toMatch(/^ok_/);
   });
 });
 
@@ -342,6 +320,24 @@ describe('deriveKiroUsage — unknown / thinking variants', () => {
     const base = deriveKiroUsage('claude-opus-5', 5000, 100, 0.05);
     const thinking = deriveKiroUsage('claude-opus-5-thinking', 5000, 100, 0.05);
     expect(thinking).toEqual(base);
+  });
+});
+
+// ============================================================================
+// Fable 5.1: 未校准前不做反演
+// ============================================================================
+
+describe('deriveKiroUsage — fable-5.1', () => {
+  it('不在价格表:unknown_model 透传,cache 恒 0,成本落到 credits 地板', () => {
+    // 理由见 derive.ts CLAUDE_PRICE_USD_PER_TOK 的 fable 注释
+    for (const model of ['claude-fable-5-1', 'claude-fable-5.1', 'claude-fable-5-1-thinking']) {
+      const out = deriveKiroUsage(model, 80000, 1200, 2.5);
+      expect(out.derived.derivedStatus).toBe('unknown_model');
+      expect(out.inputTokens).toBe(80000);
+      expect(out.cacheCreationInputTokens).toBe(0);
+      expect(out.cacheReadInputTokens).toBe(0);
+      expect(out.derived.finalCostUsd).toBeCloseTo(2.5 * 0.04, 12);
+    }
   });
 });
 

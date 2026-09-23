@@ -109,6 +109,21 @@ describe('mapModel', () => {
     expect(mapModel('claude-sonnet-4-5-20250929-thinking')).toBe('claude-sonnet-4.5');
   });
 
+  it('test_map_model_fable_5_1', () => {
+    // 上游 modelId 带小数点(claude-fable-5.1);客户端 dash / dot / [1m] / -thinking 都命中
+    expect(mapModel('claude-fable-5-1')).toBe('claude-fable-5.1');
+    expect(mapModel('claude-fable-5.1')).toBe('claude-fable-5.1');
+    expect(mapModel('claude-fable-5-1[1m]')).toBe('claude-fable-5.1');
+    expect(mapModel('claude-fable-5-1-thinking')).toBe('claude-fable-5.1');
+    expect(mapModel('Claude-Fable-5-1')).toBe('claude-fable-5.1');
+  });
+
+  it('test_map_model_fable_other_versions_undefined', () => {
+    // Kiro 只有 5.1:Fable 5 不静默升到 5.1(400 UnsupportedModel)
+    expect(mapModel('claude-fable-5')).toBeUndefined();
+    expect(mapModel('claude-fable-5-thinking')).toBeUndefined();
+  });
+
   it('test_map_model_glm_no_longer_supported', () => {
     expect(mapModel('glm-5')).toBeUndefined();
     expect(mapModel('GLM-5')).toBeUndefined();
@@ -156,6 +171,14 @@ describe('getContextWindowSize / usesNativeReasoning — opus-5', () => {
   it('opus 4.5 边界: 非 1M、非原生(不被 opus-5 改动误伤)', () => {
     expect(getContextWindowSize('claude-opus-4-5')).toBe(200_000);
     expect(usesNativeReasoning('claude-opus-4.5')).toBe(false);
+  });
+});
+
+describe('getContextWindowSize — fable-5.1', () => {
+  // usesNativeReasoning 由 reasoning-native.test.ts 的全量模型表覆盖
+  it('fable-5.1 context window 为 1M', () => {
+    expect(getContextWindowSize('claude-fable-5-1')).toBe(1_000_000);
+    expect(getContextWindowSize('claude-fable-5-1-thinking')).toBe(1_000_000);
   });
 });
 
