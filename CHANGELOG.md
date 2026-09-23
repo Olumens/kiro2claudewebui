@@ -1,3 +1,10 @@
+# [1.8.0](https://github.com/yupanzi/kiro2claude/compare/v1.7.0...v1.8.0) (2026-09-23)
+
+
+### Features
+
+* **core:** 支持 claude-fable-5.1 ([432fbc6](https://github.com/yupanzi/kiro2claude/commit/432fbc69cce7d4d3b21eafee2607dd93f07cac00))
+
 # [1.7.0](https://github.com/yupanzi/kiro2claude/compare/v1.6.4...v1.7.0) (2026-09-19)
 
 
