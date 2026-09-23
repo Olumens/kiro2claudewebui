@@ -6,9 +6,15 @@
 
 Kiro 上游 `meteringUsage` 只给一个聚合 credit 数,缺失下游 Anthropic 客户端期望的 `cache_creation_input_tokens` / `cache_read_input_tokens` 拆分。本 plugin 在 `onUsageFinish` hook 里读 `'kiro.creditsUsed'` meta key,基于回归拟合常数(`KIRO_K_IN` / `KIRO_K_OUT`)反演 cache 字段,通过 `overrideStandardField` 或 `addExtension('kiro_derived', ...)` 注入。
 
-### GPT-5.6 系列例外(credit 锚定)
+### GPT-5.6 系列(独立反演,成本锚定 credit)
 
-GPT-5.6(sol/terra/luna 及 Codex 别名)走 `deriveKiroUsage` 顶部的**专属分支**,不套上面的 cache 反演。本地 kiro-cli 多档对照实测(固定大前缀重发 10k/50k/100k tokens):Claude 稳定降 ~47%、GPT 全系列降 0%,故 GPT **无 prompt-cache 经济学**(缺口在 Kiro 计费层、非模型能力——官方 GPT-5.6 有 caching);且 output 含**加密 reasoning**(计费但不进可见 `output_tokens`),量因任务而异不可观测 → credit 无法 token 级分解。故 GPT `input_tokens` 全量、`cache_read`/`cache_creation` 恒 0,成本直接锚定 `credits × KIRO_OVERAGE_RATE`(× multiplier),`derivedStatus = 'gpt_credit_anchored'`。**切勿给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`**——偏高的 credits(含隐藏 reasoning)会被标准反演误推成虚高等效 input、进而把 input 误拆成 `cache_creation`。红线详见 `src/derive.ts` 的 `gptCreditAnchoredBreakdown` 头注释。
+GPT-5.6(sol/terra/luna 及 Codex 别名)走 `deriveKiroUsage` 顶部的**专属分支**,用自己的计费公式反演缓存:
+
+```
+credits = 倍率 × [ GPT_K_IN · (未命中 + 0.1 · 命中) + GPT_K_OUT · 输出 ]
+```
+
+2026-09 直打标定:缓存价恰为冷价的 0.1×、命中 = 同 conversationId 里此前请求的前缀、换 conversationId 不命中;倍率即上游 rateMultiplier(sol 4.4 / terra 2.2 / luna 1.1)。隐藏的推理 token 无法观测,按 0 解,因此 `cache_read` 只会**低估**不会虚报;`cache_creation` 恒 0(OpenAI 缓存没有写入溢价)。成本不按单价重算,仍锚定 `credits × KIRO_OVERAGE_RATE`(× multiplier),`derivedStatus = 'gpt_credit_anchored'`。**切勿给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`**——Claude 的系数与缓存比例和 GPT 不同。常数与证据见 `src/derive.ts` 的 `gptCacheDerivedBreakdown` 头注释。
 
 ## 依赖
 

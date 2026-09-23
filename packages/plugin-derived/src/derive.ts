@@ -57,8 +57,8 @@ export const KIRO_OVERAGE_RATE = 0.04;
  * the opus anchor (0.5276) — opus dominates typical traffic and is
  * the only deterministic multi-anchor measurement. NOT the Anthropic
  * 0.1× cache-read price — using that here caps the derivable hit ratio
- * at ~52% and was the root cause of derived cache ratios plateauing
- * around 30% on real (~99% cached) traffic.
+ * at ~52%, so derived cache ratios plateau around 30% on real (~99%
+ * cached) traffic.
  *
  * Probe scripts + raw data live outside this repo (offline calibration
  * dataset, not shipped) — rerun those to refit if upstream changes its
@@ -156,7 +156,7 @@ const CLAUDE_PRICE_USD_PER_TOK: Record<string, ClaudePrice> = {
     cacheCreation: 6.25e-6,
   },
   // claude-fable-5-1 故意不列:Kiro 标 6x,偏离上面各模型「倍率 / 输入单价 ≈ 0.44」的线,
-  // 按标价反演会低估 cache_read。未用真实 credit 校准前走 unknown_model 透传。
+  // 按标价反演会低估 cache_read,故走 unknown_model 透传;要反演须先用真实 credit 标定。
 };
 
 /** Anthropic 最小可缓存前缀(prompt-caching 文档,各平台一致);随代际不单调。 */
@@ -194,7 +194,8 @@ export type DerivedStatus =
   | 'unknown_model'
   | 'below_threshold'
   | 'ok_derived'
-  // GPT-5.6 credit 锚定分支(sol/terra/luna 及 Codex 别名);详见 `gptCreditAnchoredBreakdown` 头注释。
+  // GPT-5.6 分支(sol/terra/luna 及 Codex 别名):成本锚定 credits,缓存由 credits 反演;
+  // 下游可能已依赖这个取值,勿改名。含义见 `gptCacheDerivedBreakdown` 头注释。
   | 'gpt_credit_anchored';
 
 /** Metadata sub-object attached as `usage.kiro_derived` on responses. */
@@ -304,23 +305,23 @@ function normalizeModelId(model: string): string {
 }
 
 /**
- * GPT 判别 —— 与 core `mapModel` 的 GPT 分支**同规则**(`includes('gpt')` + 变体
+ * GPT 判别 + 变体(决定上游倍率)—— 与 core `mapModel` 的 GPT 分支**同规则**(`includes('gpt')` + 变体
  * token sol/terra/luna/codex),而非宽泛的 `startsWith('gpt')`。理由:`mapModel` 用
  * `includes` 路由,故 provider 前缀(`openai/gpt-5.6-sol`)、前后空格也会被映射到 GPT
  * 上游、按 GPT 真实计费;若这里用 `startsWith` 会漏判它们 → 误落 Claude 价格表 →
  * `unknown_model`,在 markup(μ>1)下少收费。反之 `gpt-opus`(被 `mapModel` 路由到
  * Claude Opus)不含变体 token → 不误命中。plugin 不能 import core,故复制判定 token
  * ——新增 GPT 变体时需与 `converter.ts` 的 `mapModel` 同步。大小写由 `toLowerCase` 兜。
+ * 判定顺序同 `mapModel`:sol → terra → luna → codex 别名归 sol。
  */
-function isGptModel(model: string): boolean {
+function gptVariant(model: string): keyof typeof GPT_RATE_MULTIPLIER | undefined {
   const lower = model.toLowerCase();
-  return (
-    lower.includes('gpt') &&
-    (lower.includes('sol') ||
-      lower.includes('terra') ||
-      lower.includes('luna') ||
-      lower.includes('codex'))
-  );
+  if (!lower.includes('gpt')) return undefined;
+  if (lower.includes('sol')) return 'sol';
+  if (lower.includes('terra')) return 'terra';
+  if (lower.includes('luna')) return 'luna';
+  if (lower.includes('codex')) return 'sol';
+  return undefined;
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -377,46 +378,74 @@ function passthroughBreakdown(
   };
 }
 
+// ============================================================================
+// GPT-5.6 pricing (fitted 2026-09 against the KiroRuntimeService target)
+// ============================================================================
+
 /**
- * GPT-5.6 系列专属:credit 锚定成本,不做 token 级反演。
+ * GPT 的 credit 公式(2026-09-23 直打标定,effort=none + 单词输出压掉推理与输出):
  *
- * 依据(本地 kiro-cli 多档对照实测,2026-07):
- * - **无缓存经济学**:固定大前缀重发(10k/50k/100k tokens)——Claude 稳定降 ~47%
- *   (缓存红利),GPT 全系列(sol/terra/luna)降 0%(sol 三次 credits 逐字节完全相同)。
- *   → `cache_read` / `cache_creation` 恒 0,input 全量计入 `input_tokens`。缺口在
- *   Kiro 计费层不传导 GPT 缓存折扣,非模型能力(OpenAI 官方 GPT-5.6 有 prompt caching)。
- * - **output 含加密 reasoning,不可辨识**:GPT reasoning 计费但不进 visible
- *   `output_tokens`(踩坑「GPT 完全相同上游」,redacted)。零-reasoning 的逐字复制任务 output 侧
- *   ≈10 credit/USD,而 counting 等高-reasoning 任务在同等可见 token 下 credits 高
- *   ~47% → 隐藏 reasoning 量因任务而异且不可观测,`(input, visibleOut, credits)`
- *   欠定,无法唯一反解"公开价等效成本"。故 **credits 是唯一可靠成本真值**。
+ *     credits = 倍率 × [ GPT_K_IN · (未命中 + GPT_CACHE_READ_RATIO · 命中) + GPT_K_OUT · 输出 ]
  *
- * 因此:input=全量、cache=0;`claudeEquivalentCostUsd` 锚定 `credits × KIRO_OVERAGE_RATE`,
- * `finalCostUsd` 走与 Claude 相同的 `applyFloor`(× multiplier;μ<1 时不跌破该地板,运营商不亏)。
- * 这与 Claude 路径反演 input 缓存结构互为镜像——GPT 的信息缺口在 output 侧,input 侧无可反的缓存结构。
- *
- * ⚠ 绝不要给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`:若填了,GPT 偏高的 credits(含隐藏
- * reasoning)会被标准 `deriveKiroUsage` 反推成虚高 `tEffIn` → step3 误把 input 拆成
- * `cache_creation`。`isGptModel` 在价格表查询前分流正是这道防线。
+ * - luna 冷请求 13.6K / 25.7K / 49.8K / 98.0K token 四点共线,斜率 ÷ 1.1 = GPT_K_IN;sol / terra
+ *   逐点等于 luna × 4 / × 2,即上游 `rateMultiplier`(4.4 / 2.2 / 1.1)。
+ * - 同 conversationId 重发:斜率恰为冷价的 1/10 → 缓存价 0.1×(OpenAI 公开折扣),命中 = 同会话
+ *   此前请求的前缀,只差约 7 token 的固定尾巴。**换 conversationId 完全不命中**,每请求
+ *   随机 id 测不出任何缓存。
+ * - 输出:数到 100 / 400 / 1600 的差分,GPT_K_OUT / GPT_K_IN = 6.66(公开价 $1.5 / $10 同比)。
+ * - `kiro.inputTokens`(contextUsage × 窗口)**含本次输出**(可见 + 推理),所有模型都如此。
  */
-function gptCreditAnchoredBreakdown(
+const GPT_K_IN = 1.6584e-5;
+const GPT_K_OUT = 1.1048e-4;
+const GPT_CACHE_READ_RATIO = 0.1;
+/** 上游 `ListAvailableModels` 的 rateMultiplier;新增 GPT 变体时与 core `mapModel` 同改。 */
+const GPT_RATE_MULTIPLIER = { sol: 4.4, terra: 2.2, luna: 1.1 } as const;
+
+/**
+ * GPT-5.6 系列:由 credits 反演缓存命中,成本仍锚定 credits×0.04。
+ *
+ * 已知 T = `kiro.inputTokens`(含输出)、v = 可见输出估计、credits;未知命中 C 与隐藏推理 h。
+ * 按 h = 0 解:
+ *
+ *     C = (GPT_K_IN · (T − v) + GPT_K_OUT · v − credits / 倍率) / ((1 − 0.1) · GPT_K_IN)
+ *
+ * 截到 `[0, T − v]`。推理把真实 credits 抬高 → 这里把它当成未命中输入 → C 只会**低估**,
+ * 不会虚报命中。Codex 长会话回放:effort=low 命中 95.9–99.6%、high 85.5–97.8%(同会话上一请求
+ * 总量为近似真值),首个冷请求反演 ≈ 0。
+ *
+ * 上报沿用 Claude 路径的恒等式 `input + cache_creation + cache_read == T`:OpenAI 的缓存没有
+ * 写入溢价,cache_creation 恒 0,未命中部分(含输出)记 input。成本不按单价重算:credits 本身
+ * 就是上游账单,`claudeEquivalentCostUsd` 锚定 credits × KIRO_OVERAGE_RATE。
+ *
+ * ⚠ 绝不要给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`:Claude 的 k_in / 缓存比例与 GPT 不同,走标准
+ * 反演会把 GPT 的 credits 拆错。`gptVariant` 在价格表查询前分流正是这道防线。
+ */
+function gptCacheDerivedBreakdown(
+  variant: keyof typeof GPT_RATE_MULTIPLIER,
   inputTokensTotal: number,
+  outputTokens: number,
   credits: number,
 ): DerivedUsageBreakdown {
-  // Math.max 对齐 Claude 路径对 input<=0 的归零(GPT 分流在 <=0 早返回之前)。
-  const inTokens = Math.max(0, inputTokensTotal);
+  const total = Math.max(0, inputTokensTotal);
+  const visibleOut = clamp(outputTokens, 0, total);
+  const mult = GPT_RATE_MULTIPLIER[variant];
+  const promptTokens = total - visibleOut;
+  const raw =
+    (GPT_K_IN * promptTokens + GPT_K_OUT * visibleOut - credits / mult) /
+    ((1 - GPT_CACHE_READ_RATIO) * GPT_K_IN);
+  const cacheRead = clamp(Math.round(raw), 0, promptTokens);
+
   const anchoredUsd = credits * KIRO_OVERAGE_RATE;
   // 复用 applyFloor,与 Claude 路径同一套 floor 语义:μ=0 free-tier 归零;μ<1 时
-  // anchoredUsd×μ 会跌破上游成本地板 credits×0.04,floor 兜住(运营商不亏)。GPT 的
-  // anchoredUsd 恰等于该地板,故 μ≥1 时 floor 从不触发、floorApplied=false。
+  // anchoredUsd×μ 会跌破上游成本地板 credits×0.04,floor 兜住(运营商不亏)。
   const { finalUsd, floorApplied } = applyFloor(anchoredUsd, credits);
   return {
-    inputTokens: inTokens,
+    inputTokens: total - cacheRead,
     cacheCreationInputTokens: 0,
-    cacheReadInputTokens: 0,
+    cacheReadInputTokens: cacheRead,
     derived: {
-      inputTokensTotal: inTokens,
-      estimatedCacheHitRatio: 0,
+      inputTokensTotal: total,
+      estimatedCacheHitRatio: total > 0 ? cacheRead / total : 0,
       claudeEquivalentCostUsd: anchoredUsd,
       finalCostUsd: finalUsd,
       costMultiplier: _multiplier,
@@ -438,12 +467,13 @@ export function deriveKiroUsage(
 ): DerivedUsageBreakdown {
   const normalizedModel = normalizeModelId(model);
 
-  // GPT-5.6 系列:credit 锚定专属分支。必须在价格表查询**之前**分流——既因 GPT
-  // 成本不靠单价(见 `gptCreditAnchoredBreakdown`),也为拦住"误填 GPT 价格表"
-  // 导致的 `cache_creation` 误拆。判别用**原始** model(与 mapModel 对齐,兼容
-  // provider 前缀 / 空格);normalizeModelId 只服务下面的价格表 key。
-  if (isGptModel(model)) {
-    return gptCreditAnchoredBreakdown(inputTokensTotal, credits);
+  // GPT-5.6 系列:专属反演分支。必须在价格表查询**之前**分流——GPT 的计价与缓存比例
+  // 与 Claude 不同(见 `gptCacheDerivedBreakdown`),也为拦住"误填 GPT 价格表"导致的误拆。
+  // 判别用**原始** model(与 mapModel 对齐,兼容 provider 前缀 / 空格);normalizeModelId
+  // 只服务下面的价格表 key。
+  const variant = gptVariant(model);
+  if (variant) {
+    return gptCacheDerivedBreakdown(variant, inputTokensTotal, outputTokens, credits);
   }
 
   const cp = CLAUDE_PRICE_USD_PER_TOK[normalizedModel];

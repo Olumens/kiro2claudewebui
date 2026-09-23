@@ -20,10 +20,10 @@ afterEach(() => {
 // Golden data: 8 points from round3/round4 calibration runs
 // ============================================================================
 // Each row: { source label, model, T_in, T_out, credits, expected ... }
-// Expected values recomputed under the KIRO_CACHE_READ_RATIO inversion
-// divisor (value + provenance: see src/derive.ts). Sonnet/Haiku rounds had
-// cache pollution, so several of them now saturate at 100% hit — that is
-// the expected inversion output for under-priced rows, not an error.
+// Expected values follow the KIRO_CACHE_READ_RATIO inversion divisor
+// (value + provenance: see src/derive.ts). Sonnet/Haiku rounds had cache
+// pollution, so several of them saturate at 100% hit — that is the
+// expected inversion output for under-priced rows, not an error.
 // Tolerances: cache_read / cache_creation / input_tokens ±10 tokens
 //             claudeEquivUsd ±1.5%
 //
@@ -175,7 +175,7 @@ describe('deriveKiroUsage — 8 golden data points (round3/round4)', () => {
       // Protocol identity
       expect(out.inputTokens + out.cacheCreationInputTokens + out.cacheReadInputTokens).toBe(c.tIn);
 
-      // claudeEquivalentCostUsd within ±0.5%
+      // claudeEquivalentCostUsd within ±TOL_USD_PCT
       const expectedUsd = c.expected.claudeUsd;
       const lo = expectedUsd * (1 - TOL_USD_PCT);
       const hi = expectedUsd * (1 + TOL_USD_PCT);
@@ -193,11 +193,10 @@ describe('deriveKiroUsage — 8 golden data points (round3/round4)', () => {
 // ============================================================================
 // Cache-hit regression: round2/round5 same-prompt resend probes
 // ============================================================================
-// The probe pair that exposed the original bug: resending an identical prompt
-// within the cache TTL is a physically ~100% cache hit, which the old
-// Anthropic-0.1× divisor could never derive (the derivable hit ratio was
-// hard-capped — see the KIRO_CACHE_READ_RATIO jsdoc in src/derive.ts);
-// under the Kiro ratio it must derive as a full hit.
+// Resending an identical prompt within the cache TTL is a physically ~100%
+// cache hit. An Anthropic-0.1× divisor could never derive it (the derivable
+// hit ratio is hard-capped — see the KIRO_CACHE_READ_RATIO jsdoc in
+// src/derive.ts); under the Kiro ratio it must derive as a full hit.
 
 describe('deriveKiroUsage — resend probe derives full cache hit (round2/round5)', () => {
   const model = 'claude-sonnet-4-5-20250929';
@@ -342,44 +341,71 @@ describe('deriveKiroUsage — fable-5.1', () => {
 });
 
 // ============================================================================
-// GPT-5.6 credit-anchored branch (measured against local kiro-cli, 2026-07)
+// GPT-5.6 branch: cache inverted from credits, cost anchored (calibrated 2026-09-23)
 // ============================================================================
-// 实测证明 GPT 无缓存经济学(同 prompt 重发 credits 逐字节不变)+ output 含不可观测
-// 的加密 reasoning(可见 output_tokens 严重偏小、credits 含它)→ credit 无法 token
-// 级分解。成本锚定 credits×0.04(唯一可靠真值)。锚点取自本地 kiro-cli 真实标定探针。
+// 直打 KiroRuntimeService 标定(effort=none、单词输出):cold = 新 conversationId;warm1 =
+// 同会话续一轮(上一请求 13626 token 全命中 + 新增 17);resend = 同会话原样重发。
+// 输出 "OK" 按 1 个可见 token 计。
 
-describe('deriveKiroUsage — GPT credit-anchored branch', () => {
-  // [label, model, tIn, tOut(可见), credits] —— 真实标定探针
-  const anchors: Array<[string, string, number, number, number]> = [
-    ['sol baseline', 'gpt-5.6-sol', 1590, 1, 0.013311834825870646],
-    ['sol large-in', 'gpt-5.6-sol', 3596, 1, 0.02873918],
-    ['terra', 'gpt-5.6-terra', 1599, 1, 0.0081067],
-    ['luna', 'gpt-5.6-luna', 1599, 1, 0.00405335],
+describe('deriveKiroUsage — GPT branch (cache inverted, cost anchored)', () => {
+  // [model, total tokens (contextUsage, 含输出), credits]
+  const COLD: Array<[string, number, number]> = [
+    ['gpt-5.6-luna', 13626, 0.2490835959369818],
+    ['gpt-5.6-luna', 49804, 0.9090471116915424],
+    ['gpt-5.6-sol', 13626, 0.9963343837479272],
+    ['gpt-5.6-sol', 49804, 3.6361884467661696],
+    ['gpt-5.6-terra', 25693, 0.93842258159204],
+  ];
+  const RESEND: Array<[string, number, number]> = [
+    ['gpt-5.6-luna', 13626, 0.025488073548922047],
+    ['gpt-5.6-luna', 49804, 0.09148442512437815],
+    ['gpt-5.6-sol', 13626, 0.10195229419568819],
+    ['gpt-5.6-sol', 49804, 0.3659377004975126],
+    ['gpt-5.6-terra', 25693, 0.09500168606965172],
   ];
 
-  for (const [label, model, tIn, tOut, credits] of anchors) {
-    it(`${label}: input=full, cache=0, cost anchored to credits×0.04`, () => {
-      const out = deriveKiroUsage(model, tIn, tOut, credits);
+  for (const [model, total, credits] of COLD) {
+    it(`${model} cold @${total}: no cache derived, cost anchored to credits×0.04`, () => {
+      const out = deriveKiroUsage(model, total, 1, credits);
       expect(out.derived.derivedStatus).toBe('gpt_credit_anchored');
-      // 三个 component 断言已蕴含协议恒等式 input+cc+cr===tIn
-      expect(out.inputTokens).toBe(tIn);
+      expect(out.cacheReadInputTokens).toBeLessThan(total * 0.01);
       expect(out.cacheCreationInputTokens).toBe(0);
-      expect(out.cacheReadInputTokens).toBe(0);
-      // 成本锚定 credits×0.04
+      expect(out.inputTokens + out.cacheReadInputTokens).toBe(total);
       expect(out.derived.claudeEquivalentCostUsd).toBeCloseTo(credits * KIRO_OVERAGE_RATE, 12);
       expect(out.derived.finalCostUsd).toBeCloseTo(credits * KIRO_OVERAGE_RATE, 12);
-      expect(out.derived.estimatedCacheHitRatio).toBe(0);
-      expect(out.derived.floorApplied).toBe(false);
-      expect(out.derived.inputTokensTotal).toBe(tIn);
+      expect(out.derived.inputTokensTotal).toBe(total);
     });
   }
 
-  it('Codex alias (gpt-5-codex) is credit-anchored without any price-table entry', () => {
-    const out = deriveKiroUsage('gpt-5-codex', 2000, 50, 0.02);
-    expect(out.derived.derivedStatus).toBe('gpt_credit_anchored');
-    expect(out.inputTokens).toBe(2000);
-    expect(out.cacheCreationInputTokens).toBe(0);
-    expect(out.cacheReadInputTokens).toBe(0);
+  for (const [model, total, credits] of RESEND) {
+    it(`${model} same-conversation resend @${total}: ≥99% derived as cache_read`, () => {
+      const out = deriveKiroUsage(model, total, 1, credits);
+      expect(out.derived.estimatedCacheHitRatio).toBeGreaterThan(0.99);
+      expect(out.cacheCreationInputTokens).toBe(0);
+      expect(out.inputTokens + out.cacheReadInputTokens).toBe(total);
+    });
+  }
+
+  it('next turn in the same conversation: cache_read ≈ the previous request total', () => {
+    // luna warm1:上一请求(cold)总量 13626,本次 13643
+    const out = deriveKiroUsage('gpt-5.6-luna', 13643, 1, 0.025798189635157537);
+    expect(out.cacheReadInputTokens).toBeGreaterThan(13626 - 50);
+    expect(out.cacheReadInputTokens).toBeLessThanOrEqual(13643);
+  });
+
+  it('hidden reasoning can only lower the derived cache_read (never over-reports)', () => {
+    const base = deriveKiroUsage('gpt-5.6-luna', 13643, 1, 0.025798189635157537);
+    const withReasoning = deriveKiroUsage('gpt-5.6-luna', 13643, 1, 0.025798189635157537 + 0.05);
+    expect(withReasoning.cacheReadInputTokens).toBeLessThan(base.cacheReadInputTokens);
+    // credits 高于冷价(推理 / 输出很多)→ 截到 0,不出现负数
+    expect(deriveKiroUsage('gpt-5.6-luna', 13626, 1, 5).cacheReadInputTokens).toBe(0);
+  });
+
+  it('Codex alias (gpt-5-codex) is priced as sol', () => {
+    const alias = deriveKiroUsage('gpt-5-codex', 13626, 1, 0.10195229419568819);
+    const sol = deriveKiroUsage('gpt-5.6-sol', 13626, 1, 0.10195229419568819);
+    expect(alias.derived.derivedStatus).toBe('gpt_credit_anchored');
+    expect(alias.cacheReadInputTokens).toBe(sol.cacheReadInputTokens);
   });
 
   it('case-insensitive: GPT-5.6-Sol still hits the GPT branch', () => {
@@ -396,7 +422,7 @@ describe('deriveKiroUsage — GPT credit-anchored branch', () => {
     expect(deriveKiroUsage(' gpt-5.6-sol ', 2000, 50, 0.02).derived.derivedStatus).toBe(
       'gpt_credit_anchored',
     );
-    // gpt-opus 被 mapModel 路由到 Claude Opus,不含 sol/terra/luna/codex → 不该 credit 锚定。
+    // gpt-opus 被 mapModel 路由到 Claude Opus,不含 sol/terra/luna/codex → 不走 GPT 分支。
     expect(deriveKiroUsage('gpt-opus', 2000, 50, 0.02).derived.derivedStatus).not.toBe(
       'gpt_credit_anchored',
     );
@@ -428,7 +454,7 @@ describe('deriveKiroUsage — GPT credit-anchored branch', () => {
 
   it('DEFENSE: GPT never enters the Claude cache-split path even at huge credits', () => {
     // 防御回归:GPT 高 credits(含隐藏 reasoning)绝不能被反推成虚高 tEffIn 再拆成
-    // cache_creation(那是 Claude 流程的假设)。isGptModel 在价格表查询前分流。
+    // cache_creation(那是 Claude 流程的假设)。gptVariant 在价格表查询前分流。
     const out = deriveKiroUsage('gpt-5.6-sol', 5000, 1, 5.0);
     expect(out.derived.derivedStatus).toBe('gpt_credit_anchored');
     expect(out.cacheCreationInputTokens).toBe(0);
@@ -447,11 +473,11 @@ describe('deriveKiroUsage — GPT credit-anchored branch', () => {
 // ============================================================================
 // Model-id normalization: alias vs dated snapshot both hit the price table
 // ============================================================================
-// Regression for the production bug (found via live kiro-cli test): the priced
-// model is the raw wire model; undated aliases (`claude-haiku-4-5`) — what Claude
-// Code and most clients actually send — missed the dated price-table keys and
-// fell to unknown_model (all input, no cache derivation). normalizeModelId now
-// owns all model-id canonicalization to the price-table key: dot-form → dash,
+// Regression guard (found via live kiro-cli test): the priced model is the raw
+// wire model; undated aliases (`claude-haiku-4-5`) — what Claude Code and most
+// clients actually send — must hit the price table, or they fall to
+// unknown_model (all input, no cache derivation). normalizeModelId owns all
+// model-id canonicalization to the price-table key: dot-form → dash,
 // `-thinking` strip, and `-YYYYMMDD` snapshot-date strip, so every variant
 // (alias / dated / dot-form / thinking) shares one key via the direct API too.
 
@@ -552,7 +578,7 @@ describe('deriveKiroUsage — cost multiplier', () => {
     expect(out.derived.costMultiplier).toBe(1.0);
   });
 
-  it('initCreditDerive(2000) is rejected (>1000 gate now lives in derive), stays 1.0', () => {
+  it('initCreditDerive(2000) is rejected (the >1000 gate lives in derive), stays 1.0', () => {
     initCreditDerive(2000);
     const out = deriveKiroUsage('claude-opus-4-5-20251101', 4177, 1, 0.029191);
     expect(out.derived.costMultiplier).toBe(1.0);
@@ -726,9 +752,9 @@ describe('initCacheReadRatio — cache-read ratio knob', () => {
 // ============================================================================
 // Plugin register — env parsing edge cases (whitespace coercion + effective log)
 // ============================================================================
-// Regression: Number("  ") === 0, so a whitespace-only env value used to
+// Regression guard: Number("  ") === 0, so a whitespace-only env value would
 // silently become multiplier 0 (free-tier, revenue zeroed) or ratio 0 (divisor
-// 1 → over-billing). parseEnvNumber now treats blank/whitespace as "unset".
+// 1 → over-billing). parseEnvNumber treats blank/whitespace as "unset".
 // afterEach's resetCreditDerive clears the module state register() mutates.
 
 describe('DerivedPlugin.register — env parsing', () => {
