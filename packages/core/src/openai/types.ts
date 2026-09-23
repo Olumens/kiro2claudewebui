@@ -61,6 +61,8 @@ export interface ChatCompletionRequest {
   stream?: boolean;
   stream_options?: { include_usage?: boolean };
   user?: string;
+  /** 会话键:派生稳定的 conversationId(见 `deriveConversationId`);空串视为未提供。 */
+  prompt_cache_key?: string;
   /** 接受但忽略(上游无对应通道) */
   n?: number;
   temperature?: number;

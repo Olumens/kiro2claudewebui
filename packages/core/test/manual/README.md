@@ -19,5 +19,6 @@
 | `multi-image-attribution-probe.mjs` 💰 / `multi-image-cli-probe.mjs` | 多图归属:API 直打(反序回执 / 交错标签 / 相同图计数)/ Docker 真 CLI 读 N 张数字图按文件判分,错误分归属错位 / OCR 误读 |
 | `replay-conversation-history.ts` / `audit-conversation-fixes.mjs` | 不调模型:重放录得请求验证历史保留 / 审计探针产物 |
 | `replay-content-preservation.ts` | 不调模型:录得的 5923 条真实 Claude Code 请求过一遍**当前** convertRequest,核对客户端文本是否上 wire、`role:system` 插入落点、history 形态。**改 converter 必跑** |
+| `session-isolation-live.mjs` 💰 | 同一 `prompt_cache_key` 下全新会话不串、同键第二轮命中缓存、GPT / Claude 推理信封回传上游照收;见 PITFALLS「会话身份映射到 kiro-cli」 |
 | `inserted-content-live.mjs` 💰 | 中途插入内容的 7 种客户端形态各埋一个 nonce 打真实上游,看回复是否含 nonce |
 | `codex-subagent-{probe,lifecycle}-server.ts` | Codex multi-agent v2 信封与生命周期矩阵;见 `docs/PITFALLS.md`「Codex code mode」 |

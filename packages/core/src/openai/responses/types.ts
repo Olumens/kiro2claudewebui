@@ -163,6 +163,10 @@ export interface ResponsesRequest {
   tools?: ResponsesTool[];
   tool_choice?: unknown;
   reasoning?: { effort?: string; summary?: string | null };
+  /** 会话键:派生稳定的 conversationId(见 `deriveConversationId`);空串视为未提供。 */
+  prompt_cache_key?: string;
+  /** 只认 `reasoning.encrypted_content`:开启推理往返(见 reasoning-envelope.ts)。 */
+  include?: string[];
   max_output_tokens?: number;
   stream?: boolean;
   // 接受但忽略(上游无对应通道 / 网关无状态)
@@ -224,14 +228,15 @@ export interface ResponsesReasoningSummaryPart {
 }
 
 /**
- * reasoning output item:Claude 明文思维链经 **summary 通道** surface。
- * 只做下行显示(summary 文本);signature/encrypted_content 的多轮 continuation 不做
- * (见踩坑「Codex 只说 Responses」 + response-stream.ts 头注)。GPT 加密 reasoning 无内容 → 不产此 item。
+ * reasoning output item:Claude 明文思维链经 **summary 通道** surface。客户端声明
+ * `include:["reasoning.encrypted_content"]` 时,Claude 签名 / GPT 加密推理装进信封放在
+ * `encrypted_content` 往返(见 reasoning-envelope.ts);GPT 的 item 摘要为空。
  */
 export interface ResponsesReasoningOutputItemOut {
   id: string;
   type: 'reasoning';
   summary: ResponsesReasoningSummaryPart[];
+  encrypted_content?: string;
 }
 
 /**

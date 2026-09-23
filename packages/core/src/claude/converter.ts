@@ -22,6 +22,8 @@ import {
   createKiroImage,
   createUserInputMessage,
   createUserMessage,
+  deriveAgentContinuationId,
+  deriveConversationId,
 } from '../kiro/model/requests/conversation.js';
 import type { AdditionalModelRequestFields, KiroRequest } from '../kiro/model/requests/kiro.js';
 import type { Tool as KiroTool, ToolResult, ToolUseEntry } from '../kiro/model/requests/tool.js';
@@ -414,6 +416,19 @@ export interface ConvertRequestOptions {
    * undefined（库函数保守默认，不去污染）。
    */
   toolTextRegistry?: ToolTextRegistry;
+  /**
+   * 客户端声明的会话身份(OpenAI 协议由 `prompt_cache_key` 推出,见各 handler)。给了就优先于
+   * `metadata.user_id` 里的 session。映射规则见 `resolveConversationIdentity`。
+   */
+  session?: ClientSession;
+}
+
+/** 一段客户端会话在 kiro-cli 里对应的会话。 */
+export interface ClientSession {
+  /** 会话键;conversationId 由它派生(`deriveConversationId`)。 */
+  key: string;
+  /** 是否是 subagent 会话:kiro-cli V2 的 subagent 会话不带 `agentContinuationId`。 */
+  subagent: boolean;
 }
 
 export class ConversionError extends Error {
@@ -479,6 +494,61 @@ function normalizeJsonSchema(schema: unknown): Record<string, unknown> {
 // ============================================================================
 // Session ID extraction
 // ============================================================================
+
+/**
+ * 把客户端会话映射成 kiro-cli V2 的会话身份(2.23.1 抓包):
+ *   - `conversationId`:一个会话一个,`--resume` 也不变;subagent 有自己的。
+ *   - `agentContinuationId`:一个用户轮次一个(`deriveAgentContinuationId`);subagent 会话不带。
+ * 不知道会话时两者都每请求随机(无从得知两个请求是否属于同一段对话)。
+ */
+function resolveConversationIdentity(
+  req: MessagesRequest,
+  session: ClientSession | undefined,
+): { conversationId: string; agentContinuationId: string | undefined } {
+  // typeof 守卫:metadata 是宽松类型,客户端可能传非字符串 user_id;直接传给
+  // extractSessionId(内部走 String.indexOf)会抛 TypeError —— 非 ConversionError,
+  // 会冒泡成未捕获 500。
+  const metadataSession =
+    typeof req.metadata?.user_id === 'string' ? extractSessionId(req.metadata.user_id) : undefined;
+  const conversationId = session
+    ? deriveConversationId(session.key)
+    : (metadataSession ?? uuidv4());
+  if (session?.subagent) return { conversationId, agentContinuationId: undefined };
+  return {
+    conversationId,
+    agentContinuationId:
+      session || metadataSession
+        ? deriveAgentContinuationId(conversationId, countUserTurns(req.messages))
+        : uuidv4(),
+  };
+}
+
+/**
+ * 用户轮次数:一段连续的、不含 tool_result 且有内容的 user 消息算一轮。带 tool_result 的 user
+ * 消息是工具循环的延续——Claude Code 常在同一条里夹带 system-reminder 文本,不能因此算新轮次。
+ */
+function countUserTurns(messages: MessagesRequest['messages']): number {
+  let turns = 0;
+  let inUserRun = false;
+  for (const msg of messages ?? []) {
+    if (msg?.role !== 'user') {
+      if (msg?.role === 'assistant') inUserRun = false;
+      continue;
+    }
+    const blocks = Array.isArray(msg.content) ? (msg.content as ContentBlock[]) : undefined;
+    const hasToolResult = blocks?.some((b) => b?.type === 'tool_result') ?? false;
+    const authored = blocks
+      ? blocks.length > 0
+      : typeof msg.content === 'string' && msg.content !== '';
+    if (hasToolResult || !authored) {
+      inUserRun = false;
+      continue;
+    }
+    if (!inUserRun) turns += 1;
+    inUserRun = true;
+  }
+  return turns;
+}
 
 /**
  * Extract session UUID from metadata.user_id.
@@ -1940,15 +2010,8 @@ export function convertRequest(
   // the first user Kiro message at step 12 (see foldSystemIntoFirstUserMessage).
   const systemPrefix = buildSystemPrefix(req, identityOverride);
 
-  // 3. Generate conversation ID and agent continuation ID
-  // typeof 守卫:metadata 是宽松类型,客户端可能传非字符串 user_id;直接传给
-  // extractSessionId(内部走 String.indexOf)会抛 TypeError —— 非 ConversionError,
-  // 会冒泡成未捕获 500。非字符串一律回退到随机 conversationId。
-  const conversationId =
-    typeof req.metadata?.user_id === 'string'
-      ? (extractSessionId(req.metadata.user_id) ?? uuidv4())
-      : uuidv4();
-  const agentContinuationId = uuidv4();
+  // 3. Conversation identity (kiro-cli 会话形态,见 resolveConversationIdentity)
+  const { conversationId, agentContinuationId } = resolveConversationIdentity(req, options.session);
 
   // 4. 从 client profile 拿本次请求所有 body 字段的真值
   const profile = getKiroClientProfile();

@@ -832,6 +832,13 @@ export class StreamContext {
   sawReasoningContent: boolean;
   reasoningBlockIndex: number | undefined;
   /**
+   * GPT 的加密推理(`redactedContent`),只记录、不进 Claude SSE:Messages / Chat 的 wire
+   * 不变,由需要往返的协议(Responses 的 `encrypted_content`)自取。一条 Kiro 消息一个
+   * 推理槽位,多帧取最后一帧。⚠ GPT 的这一帧在 tool_use **之后**、响应末尾才到,
+   * 消费方只能在收尾时读。
+   */
+  redactedReasoning: string | undefined;
+  /**
    * Raw kiro metering payload from upstream. Surfaced to plugins via the
    * UsageFinishEvent meta keys (`kiro.creditsUsed`, etc.); core itself does
    * NOT consume this for wire format.
@@ -900,6 +907,7 @@ export class StreamContext {
     this.legacyThinkingDecoder = thinkingEnabled ? new LegacyThinkingDecoder() : undefined;
     this.sawReasoningContent = false;
     this.reasoningBlockIndex = undefined;
+    this.redactedReasoning = undefined;
     this.kiroMeteringRaw = undefined;
     this.pendingUpstreamError = undefined;
     this.hookBus = hookBus;
@@ -1014,6 +1022,7 @@ export class StreamContext {
         return this.processAssistantResponse(event.content);
 
       case 'ReasoningContent':
+        if (event.redactedContent) this.redactedReasoning = event.redactedContent;
         return this.processReasoningContent(event.text, event.signature);
 
       case 'ToolUse':

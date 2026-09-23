@@ -86,7 +86,7 @@ Kiro wire 只有消息级 `images[]`——`toolResults[].content` 塞 Bedrock �
 
 `usage.input_tokens` 不是上游直接给的,是网关拿 `contextUsageEvent.contextUsagePercentage` 乘 `getContextWindowSize()` 反推的。**上游改窗口不报错、只缩放**:Kiro 2026-09-14 把 GPT-5.6 升到 1M(`kiro-cli chat --list-models` 写 "1M context window"),网关仍按 272K 算就整体低报 3.68 倍。
 
-后果直通计费:Kiro 对 >272K 的请求**整条**按双倍档计(sol 4.4x→8.8x)。实测 gpt-5.6-luna 单请求 250,338 token 记 18.25 credit/M、301,919 token 记 36.50,恰好 2.0 倍。低报时客户端以为还有余量,真实上下文养到 ~95 万,整段会话每条都落双倍档,单请求可达正常档的数十倍。同请求重发 credit 逐字节不变,GPT 无缓存折扣,没有别的缓解。
+后果直通计费:Kiro 对 >272K 的请求**整条**按双倍档计(sol 4.4x→8.8x)。实测 gpt-5.6-luna 单请求 250,338 token 记 18.25 credit/M、301,919 token 记 36.50,恰好 2.0 倍。低报时客户端以为还有余量,真实上下文养到 ~95 万,整段会话每条都落双倍档,单请求可达正常档的数十倍。当时同请求重发 credit 逐字节不变,那是每请求随机 conversationId 导致的零缓存(见「会话身份映射到 kiro-cli」);双倍档本身没有别的缓解。
 
 **为什么 1M 是对的**:Codex 不读网关上报的窗口,只拿 `input_tokens` 比自己内置的常量——Codex 0.154 对 gpt-5.6-sol 内置 272000 再乘 0.95 保留系数 = 258,400(session rollout 的 `model_context_window` 可查)。上报准确时它在真实 258.4K 就压缩,**恰停在双倍线下方,余量 13,600**;低报 3.68 倍时同一个 258.4K 对应真实 950,912,于是整段双倍。★ 这个余量依赖客户端那个常量不变:**客户端若跟进抬到 1M,余量立刻消失**,届时须在客户端侧 pin `model_context_window`。
 
@@ -98,7 +98,32 @@ Kiro 逐账号灰度,还停在 272K 的账号把 `KIRO2CLAUDE_GPT_CONTEXT_WINDOW
 
 ### Codex 只说 Responses
 
-`wire_api=chat` 在 Codex 0.122+ 移除,必须走 `/openai/v1/responses`(请求 `input` items + 扁平 tools,响应严格语义事件序列)。编码器红线全在 `openai/responses/response-stream.ts` 头注释(`content_part.added` 先于 `output_text.delta`、done 回填全文、纯工具调用不产空 message、thinking → reasoning summary 惰性开),改编码器前先跑真实 Codex(`tools/codex/`)。
+`wire_api=chat` 在 Codex 0.122+ 移除,必须走 `/openai/v1/responses`(请求 `input` items + 扁平 tools,响应严格语义事件序列)。编码器红线全在 `openai/responses/response-stream.ts` 头注释(`content_part.added` 先于 `output_text.delta`、done 回填全文、纯工具调用不产空 message、thinking → reasoning summary 惰性开),改编码器前先跑真实 Codex(`tools/codex/`)。推理的 `encrypted_content` 往返见「推理往返」。
+
+### 会话身份映射到 kiro-cli
+
+上游的缓存折扣按 `conversationId` 给,而且只在 credit 上体现:usage 里 `cache_read` / `cache_creation` 恒为 0,但同一 id 下后续轮次明显更便宜。2026-09-23 用 Docker Codex 0.156.1 + gpt-5.6-sol 跑同一个 5 步编码任务(A/B/A/B):每请求随机 id 两轮共 8.09 / 8.91 credit,每轮都按冷价(约 0.078 credit/1K input);从 `prompt_cache_key` 派生稳定 id 后是 2.59 / 2.56,首轮 0.84,之后每轮 0.12–0.27。kiro-cli 2.23.1 的 V2 与 `--v3` 整个会话都用同一个 id,曲线与稳定组一致。
+
+网关按 kiro-cli 的会话形态映射,不自创规则(真相源 `resolveConversationIdentity`,`claude/converter.ts`)。kiro-cli 2.23.1 抓包:
+
+| 字段 | V2(网关模拟的形态) | V3(KAS) |
+|---|---|---|
+| `conversationId` | 一个会话一个,`--resume` 不变 | `sess_<uuid>`,同左 |
+| `agentContinuationId` | 一个用户轮次一个,轮内工具往返不变 | 会话内固定 |
+| subagent | `use_subagent`:自己的 conversationId,**不带** `agentContinuationId` | `invoke_sub_agent`:自己的 id + `rootConversationId` 指向父会话 + 顶层 `agentMode` 换成子 agent 的 |
+
+- 客户端会话键:Chat / Responses 读 `prompt_cache_key`,Messages 读 `metadata.user_id` 里的 session;都没有时两个 id 每请求随机。轮次数由消息结构推出(`countUserTurns`:不含 tool_result 的 user 连串算一轮,Claude Code 夹在 tool_result 里的 reminder 不算)。录得的 5923 条 Claude Code 请求重放:acid 切换 358 次全在用户新输入上,工具循环中途 0 次。
+- **Codex subagent 映射成 kiro-cli subagent 会话**:父子共用 `prompt_cache_key`,线程身份只在 `thread-id` 头里(根线程等于 key)。与 key 不同的 `thread-id` 按 subagent 会话映射(`responsesSession`)。子线程首个请求因此冷启动(实测 0.78,与 V3 原生 0.87 同量级),之后命中自己的缓存,父线程缓存不受影响。别为了省这次冷启动让父子共用 id:那会偏离 kiro-cli 的会话形态。
+- **会话隔离不靠 id**:上游不按 conversationId 存历史。同一个 id 下开一段全新会话问 A 里埋的暗号,luna / sol / sonnet-5 共 7 次都答 NONE,带历史的正对照 7/7 答对。
+- 复跑:`test/manual/session-isolation-live.mjs`;守卫 `test/claude/converter-conversation-identity.test.ts` + `test/openai/responses/reasoning-roundtrip.test.ts`。
+
+### 推理往返
+
+kiro-cli 每轮都把上一轮推理放回 history 的 `reasoningContent`:V2 发 GPT 的 `{redactedContent}`,V3 带 effort=high 发 `{reasoningText:{text:"...",signature}}`。网关以前把 GPT 的密文直接丢掉,Codex 路径的 history 里从来没有推理。现在 Responses 在客户端声明 `include:["reasoning.encrypted_content"]` 时,把 Kiro 形态装进信封(`openai/responses/reasoning-envelope.ts`)放在 `encrypted_content`,下一轮拆开还原;Chat / Messages 行为不变。
+
+- **GPT 的推理帧在 tool_use 之后、响应末尾才到**,所以流式里它的 reasoning item 排在 function_call 之后(`finalize` 追加);回程靠 `mergeAssistantMessages` 与同一条 assistant 合并。
+- 信封绑定上游 modelId,换模型后旧推理不回传;认不出的密文(真 OpenAI 的、被改坏的)一律丢弃。网关不存推理状态,不可能跨会话串。
+- 实测:上游对回传的 `redactedContent` 与 Claude 签名都照收,不触发剥离重试,缓存照样命中。代价是历史里的推理计入 input,effort 高时单轮 credit 略升(同任务 3.21 对 2.49,多出来的是推理 token,不是缓存失效)。Codex 默认 effort=low,GPT 大多不产推理帧。
 
 ### Codex code mode
 
@@ -120,7 +145,7 @@ code mode 的 `additional_tools` 里**没有** `web_search`(`tools.web_search=tr
 
 ### GPT credit 锚定
 
-GPT 侧 `(input, visibleOut, credits)` 欠定——Kiro 不传导 GPT 缓存折扣(`cache_read`/`cache_creation` 恒 0、input 全量计入),且 output 含加密 reasoning(计费不 surface),无法反解「公开价等效成本」。故唯一可靠真值 `credits×0.04`(× multiplier),走 `deriveKiroUsage` 顶部 `isGptModel` 专属分支(status `gpt_credit_anchored`)。**绝不给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`**:偏高 credits 会被标准反演误推成虚高 `tEffIn` → 把 input 误拆成 `cache_creation`(分流必须在价格表查询**前**)。红线在 `gptCreditAnchoredBreakdown` 头注释。
+GPT 侧 `(input, visibleOut, credits)` 欠定——Kiro 不在 usage 里 surface GPT 缓存(`cache_read`/`cache_creation` 恒 0、input 全量计入,折扣只落在 credits 上,见「会话身份映射到 kiro-cli」),且 output 含加密 reasoning(计费不 surface),无法反解「公开价等效成本」。故唯一可靠真值 `credits×0.04`(× multiplier),走 `deriveKiroUsage` 顶部 `isGptModel` 专属分支(status `gpt_credit_anchored`)。**绝不给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`**:偏高 credits 会被标准反演误推成虚高 `tEffIn` → 把 input 误拆成 `cache_creation`(分流必须在价格表查询**前**)。红线在 `gptCreditAnchoredBreakdown` 头注释。
 
 ## 错误流转 · 容量事件诊断
 

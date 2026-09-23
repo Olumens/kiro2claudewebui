@@ -162,7 +162,37 @@ export function createAssistantMessage(content: string): AssistantMessage {
  * 别处可能出现的裸 hash 撞用途。
  */
 function deriveMessageId(seed: string): string {
-  const bytes = createHash('sha256').update(`kiro2claude:messageId:${seed}`).digest();
+  return deriveUuidV4Shape('messageId', seed);
+}
+
+/**
+ * 从客户端的会话键确定性派生 `conversationId`(键从哪来见 `resolveConversationIdentity`;Codex 子线程
+ * 另有自己的键,见 `responsesSession`)。
+ *
+ * ★ 为什么不能每请求 `uuidv4()`:上游的缓存折扣按 conversationId 给。2026-09 用 Codex
+ * 实测同一任务:随机 id 每轮都按冷价计(约 0.08 credit/1K input),稳定 id 从第二轮起降到
+ * 约 1/5,整段会话省约 70%。kiro-cli(V2 / V3)整个会话都用同一个 id。
+ *
+ * 会话隔离靠键本身:不同会话的键不同 → id 不同;同一个键 = 客户端声明的同一段对话。
+ * 上游不按 conversationId 存历史(每次都整段重发),撞键只影响缓存命中,不会串内容。
+ * 证据与复跑入口见 PITFALLS「会话身份映射到 kiro-cli」。
+ */
+export function deriveConversationId(sessionKey: string): string {
+  return deriveUuidV4Shape('conversationId', sessionKey);
+}
+
+/**
+ * kiro-cli V2 的 `agentContinuationId` 是「一个用户轮次一个」:同一轮里的工具往返不变,
+ * 下一条用户输入(同进程或 `--resume`)换新(2.23.1 抓包)。按「会话 + 轮次序号」派生,
+ * 同一轮的每个请求都得到同一个值。subagent 会话不带此字段,由调用方省略。
+ */
+export function deriveAgentContinuationId(conversationId: string, userTurn: number): string {
+  return deriveUuidV4Shape('agentContinuationId', `${conversationId}#${userTurn}`);
+}
+
+/** 按「用途 + 种子」派生 UUID v4 形状的值;用途前缀让不同字段的派生值互不相撞。 */
+function deriveUuidV4Shape(purpose: string, seed: string): string {
+  const bytes = createHash('sha256').update(`kiro2claude:${purpose}:${seed}`).digest();
   const b = Buffer.from(bytes.subarray(0, 16));
   // RFC 4122：version 4 + variant 10xx，让派生值与真 uuidv4 在形状上不可区分
   b[6] = (b[6] & 0x0f) | 0x40;

@@ -28,6 +28,7 @@ export const chatCompletionRequestSchema = z
     stream: z.boolean().optional(),
     stream_options: z.unknown().optional(),
     user: z.unknown().optional(),
+    prompt_cache_key: z.unknown().optional(),
   })
   .passthrough()
   .transform((raw): ChatCompletionRequest => {
@@ -50,6 +51,10 @@ export const chatCompletionRequestSchema = z
       stream: raw.stream,
       stream_options: include_usage === undefined ? undefined : { include_usage },
       user: typeof raw.user === 'string' ? raw.user : undefined,
+      prompt_cache_key:
+        typeof raw.prompt_cache_key === 'string' && raw.prompt_cache_key
+          ? raw.prompt_cache_key
+          : undefined,
     };
   });
 

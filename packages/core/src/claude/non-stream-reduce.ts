@@ -37,6 +37,8 @@ export interface ReducedAttempt {
   /** 原生 reasoning 累积(GPT redacted 不入,保持空;Claude 明文累积) */
   reasoningText: string;
   reasoningSignature: string | undefined;
+  /** GPT 加密推理(多帧取最后一帧);只供 Responses 的 `encrypted_content` 往返,不进可见输出 */
+  redactedReasoning: string | undefined;
   /** legacy `<thinking>` 标签提取出的思考(与 reasoningText 互斥) */
   thinkingText: string | undefined;
   /** 提取 thinking + 救援后的最终可见文本 */
@@ -132,6 +134,7 @@ export function reduceKiroResponse(
   // 跳过 legacy 文本 framing；text/signature 决定是否有可 surface 的 thinking。
   let reasoningText = '';
   let reasoningSignature: string | undefined;
+  let redactedReasoning: string | undefined;
 
   // Collect tool call incremental JSON
   const toolJsonBuffers = new Map<string, string>();
@@ -191,6 +194,7 @@ export function reduceKiroResponse(
         // ★ 与流式 `processReasoningContent` 同源的边界:空帧只能作废**尚未
         // 落定**的分类。thinking 块已经开着时不能退掉 decoder——否则剩下的私有
         // 推理连同字面 `</thinking>` 会掉进可见文本。
+        if (event.redactedContent) redactedReasoning = event.redactedContent;
         if (!event.text && !event.signature && legacyDecoder?.hasOpenThinking) break;
 
         sawReasoningContentEvent = true;
@@ -445,6 +449,7 @@ export function reduceKiroResponse(
   return {
     reasoningText,
     reasoningSignature,
+    redactedReasoning,
     thinkingText,
     textContent,
     toolUses,

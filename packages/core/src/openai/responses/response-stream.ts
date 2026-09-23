@@ -19,14 +19,19 @@
  *
  * usage 用 StreamContext 原始 token(不经 buildClaudeUsagePayload,理由同 chat 端点)。
  * Claude 明文 thinking → reasoning summary item(惰性开:首个 thinking_delta 才产 item,见
- * reasoningDelta;summary 通道,兼容面最广)。GPT 加密 reasoning(redacted)在归约层已被丢、
- * 编码器收不到 thinking 事件 → 天然不产 reasoning item(Codex 路径逐字节不变,踩坑「Codex 只说 Responses」)。
- * signature_delta 仍丢弃:它是 continuation 凭证、非用户可读内容,本版只做下行显示。
+ * reasoningDelta;summary 通道,兼容面最广)。
+ *
+ * ★ 推理往返(`reasoningModelId` 非空 = 客户端声明了 `include:["reasoning.encrypted_content"]`):
+ *   Claude 的 signature 与 GPT 的 redactedContent 装进信封放在 `encrypted_content`,客户端下一轮
+ *   原样带回,converter 还原成 history 的 `reasoningContent`(信封格式与隔离规则见
+ *   reasoning-envelope.ts)。GPT 那一帧在 tool_use **之后**才到,所以它的 reasoning item 只能在
+ *   `finalize` 里追加在已发 item 之后。未声明 include 时行为不变:签名丢弃、GPT 不产 item。
  */
 
 import { v4 as uuidv4 } from 'uuid';
 import type { SseEvent } from '../../claude/stream.js';
 import { NO_FREEFORM_TOOLS, unwrapFreeformArgs } from '../freeform-tool.js';
+import { encodeReasoningEnvelope } from './reasoning-envelope.js';
 import { responsesIncompleteDetails } from './response-nonstream.js';
 import type {
   ResponsesObject,
@@ -49,6 +54,9 @@ type ReasoningItem = {
   index: number;
   itemId: string;
   summaryText: string;
+  /** 是否已发 summary_part.added;只有签名没有明文的 thinking 块不开 summary part。 */
+  summaryOpen: boolean;
+  signature: string | undefined;
 };
 type ToolCallItem = {
   kind: 'function_call';
@@ -82,15 +90,19 @@ export class ResponsesEventEncoder {
   private stopReason = 'end_turn';
 
   private readonly toolNamespaces: ReadonlyMap<string, string>;
+  /** 上游 modelId;非空才下发 `encrypted_content`(见文件头「推理往返」)。 */
+  private readonly reasoningModelId: string | undefined;
 
   constructor(
     model: string,
     customToolNames: ReadonlySet<string> = NO_FREEFORM_TOOLS,
     toolNamespaces: ReadonlyMap<string, string> = NO_TOOL_NAMESPACES,
+    reasoningModelId?: string,
   ) {
     this.model = model;
     this.customToolNames = customToolNames;
     this.toolNamespaces = toolNamespaces;
+    this.reasoningModelId = reasoningModelId;
   }
 
   /**
@@ -155,6 +167,7 @@ export class ResponsesEventEncoder {
           text?: string;
           partial_json?: string;
           thinking?: string;
+          signature?: string;
         };
         if (d.type === 'text_delta' && typeof d.text === 'string') {
           return this.textDelta(d.text, ev.data.index as number);
@@ -165,7 +178,10 @@ export class ResponsesEventEncoder {
         if (d.type === 'input_json_delta' && typeof d.partial_json === 'string') {
           return this.argsDelta(d.partial_json);
         }
-        return []; // signature_delta 丢弃(continuation 凭证,非用户可读内容)
+        if (d.type === 'signature_delta' && typeof d.signature === 'string') {
+          return this.reasoningSignature(d.signature, ev.data.index as number);
+        }
+        return [];
       }
 
       case 'content_block_stop':
@@ -234,26 +250,25 @@ export class ResponsesEventEncoder {
     return out;
   }
 
-  /** 惰性开 reasoning item:发 output_item.added(reasoning) + reasoning_summary_part.added。 */
+  /** 惰性开 reasoning item:发 output_item.added(reasoning);summary part 由 reasoningDelta 开。 */
   private openReasoning(claudeIdx: number): string[] {
     const out = this.closeCurrent();
     const itemId = `rs_${uuidv4().replace(/-/g, '')}`;
     const index = this.outputIndex;
-    this.current = { kind: 'reasoning', claudeIdx, index, itemId, summaryText: '' };
+    this.current = {
+      kind: 'reasoning',
+      claudeIdx,
+      index,
+      itemId,
+      summaryText: '',
+      summaryOpen: false,
+      signature: undefined,
+    };
     out.push(
       this.line({
         type: 'response.output_item.added',
         output_index: index,
         item: { id: itemId, type: 'reasoning', summary: [] },
-      }),
-    );
-    out.push(
-      this.line({
-        type: 'response.reasoning_summary_part.added',
-        item_id: itemId,
-        output_index: index,
-        summary_index: 0,
-        part: { type: 'summary_text', text: '' },
       }),
     );
     return out;
@@ -267,6 +282,18 @@ export class ResponsesEventEncoder {
       out.push(...this.openReasoning(claudeIdx));
     }
     const cur = this.current as Extract<CurrentItem, { kind: 'reasoning' }>;
+    if (!cur.summaryOpen) {
+      cur.summaryOpen = true;
+      out.push(
+        this.line({
+          type: 'response.reasoning_summary_part.added',
+          item_id: cur.itemId,
+          output_index: cur.index,
+          summary_index: 0,
+          part: { type: 'summary_text', text: '' },
+        }),
+      );
+    }
     cur.summaryText += text;
     out.push(
       this.line({
@@ -277,6 +304,20 @@ export class ResponsesEventEncoder {
         delta: text,
       }),
     );
+    return out;
+  }
+
+  /**
+   * signature 只在往返开启时有用:记到对应的 reasoning item 上,关闭时装进信封。没有明文、
+   * 只有签名的 thinking 块(display omitted)也要开一个空摘要的 item,否则签名无处安放。
+   */
+  private reasoningSignature(signature: string, claudeIdx: number): string[] {
+    if (!this.reasoningModelId) return [];
+    const out: string[] = [];
+    if (this.current?.kind !== 'reasoning' || this.current.claudeIdx !== claudeIdx) {
+      out.push(...this.openReasoning(claudeIdx));
+    }
+    (this.current as ReasoningItem).signature = signature;
     return out;
   }
 
@@ -370,29 +411,37 @@ export class ResponsesEventEncoder {
     };
   }
 
-  /** reasoning:summary_text.done → summary_part.done(回填完整摘要)。 */
+  /** reasoning:summary_text.done → summary_part.done(回填完整摘要);有签名时附信封。 */
   private closeReasoning(cur: ReasoningItem): ClosedItem {
-    const out = [
-      this.line({
-        type: 'response.reasoning_summary_text.done',
-        item_id: cur.itemId,
-        output_index: cur.index,
-        summary_index: 0,
-        text: cur.summaryText,
-      }),
-      this.line({
-        type: 'response.reasoning_summary_part.done',
-        item_id: cur.itemId,
-        output_index: cur.index,
-        summary_index: 0,
-        part: { type: 'summary_text', text: cur.summaryText },
-      }),
-    ];
+    const out = cur.summaryOpen
+      ? [
+          this.line({
+            type: 'response.reasoning_summary_text.done',
+            item_id: cur.itemId,
+            output_index: cur.index,
+            summary_index: 0,
+            text: cur.summaryText,
+          }),
+          this.line({
+            type: 'response.reasoning_summary_part.done',
+            item_id: cur.itemId,
+            output_index: cur.index,
+            summary_index: 0,
+            part: { type: 'summary_text', text: cur.summaryText },
+          }),
+        ]
+      : [];
     const item: ResponsesReasoningOutputItemOut = {
       id: cur.itemId,
       type: 'reasoning',
-      summary: [{ type: 'summary_text', text: cur.summaryText }],
+      summary: cur.summaryOpen ? [{ type: 'summary_text', text: cur.summaryText }] : [],
     };
+    if (this.reasoningModelId && cur.signature) {
+      item.encrypted_content = encodeReasoningEnvelope(
+        { reasoningText: { text: cur.summaryText, signature: cur.signature } },
+        this.reasoningModelId,
+      );
+    }
     return { out, item };
   }
 
@@ -492,9 +541,34 @@ export class ResponsesEventEncoder {
     return out;
   }
 
-  /** 收口:发 completed/incomplete,保留实际已接收的 output 与 usage。 */
-  finalize(usage: ResponsesUsage): string[] {
+  /**
+   * 收口:发 completed/incomplete,保留实际已接收的 output 与 usage。`redactedReasoning` 是
+   * GPT 的加密推理,往返开启时在这里追加成独立 reasoning item(它晚于 tool_use 到达)。
+   */
+  finalize(usage: ResponsesUsage, redactedReasoning?: string): string[] {
     const out = this.closeCurrent();
+    if (this.reasoningModelId && redactedReasoning) {
+      const index = this.outputIndex++;
+      const itemId = `rs_${uuidv4().replace(/-/g, '')}`;
+      const item: ResponsesReasoningOutputItemOut = {
+        id: itemId,
+        type: 'reasoning',
+        summary: [],
+        encrypted_content: encodeReasoningEnvelope(
+          { redactedContent: redactedReasoning },
+          this.reasoningModelId,
+        ),
+      };
+      out.push(
+        this.line({
+          type: 'response.output_item.added',
+          output_index: index,
+          item: { id: itemId, type: 'reasoning', summary: [] },
+        }),
+        this.line({ type: 'response.output_item.done', output_index: index, item }),
+      );
+      this.completedItems.push(item);
+    }
     const incompleteDetails = responsesIncompleteDetails(this.stopReason);
     const resp = this.responseObject(incompleteDetails ? 'incomplete' : 'completed');
     resp.incomplete_details = incompleteDetails;

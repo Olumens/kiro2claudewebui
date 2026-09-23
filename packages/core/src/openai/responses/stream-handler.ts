@@ -29,11 +29,14 @@ export async function handleResponsesStreamRequest(
   emptyStreamRetries = 0,
   rescueRegistry: ToolTextRegistry | undefined,
   codec: ResponsesToolCodec,
+  /** 非空 = 推理往返开启(见 response-stream.ts 文件头)。 */
+  reasoningModelId?: string,
 ): Promise<MessageHandlerResult> {
   const protocol: OpenAiStreamProtocol<ResponsesEventEncoder> = {
-    // codec 走闭包注入:它是 responses 协议特有的,而 runOpenAiStream 的签名
-    // 由 chat 端点共用。
-    makeEncoder: (m) => new ResponsesEventEncoder(m, codec.customToolNames, codec.toolNamespaces),
+    // codec / reasoningModelId 走闭包注入:它们是 responses 协议特有的,而
+    // runOpenAiStream 的签名由 chat 端点共用。
+    makeEncoder: (m) =>
+      new ResponsesEventEncoder(m, codec.customToolNames, codec.toolNamespaces, reasoningModelId),
     finalTerminal: (encoder, ctx) =>
       encoder.finalize(
         buildResponsesUsage(
@@ -41,6 +44,7 @@ export async function handleResponsesStreamRequest(
           ctx.outputTokens,
           resolvePluginUsageExtensions(ctx.usageFinishEvent),
         ),
+        ctx.redactedReasoning,
       ),
     inbandError: (encoder, message, type) => [encoder.errorLine(message, type)],
   };

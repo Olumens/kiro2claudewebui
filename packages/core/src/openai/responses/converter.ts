@@ -16,6 +16,7 @@
  * 随返回值传到响应侧,否则编码器会把 custom 调用错编成 `function_call`。
  */
 
+import { mapModel } from '../../claude/converter.js';
 import type {
   Message as ClaudeMessage,
   ContentBlock,
@@ -36,6 +37,7 @@ import {
   FREEFORM_TOOL_SCHEMA,
   wrapFreeformInput,
 } from '../freeform-tool.js';
+import { decodeReasoningEnvelope } from './reasoning-envelope.js';
 import type {
   ResponsesAgentMessageItem,
   ResponsesContentPart,
@@ -131,6 +133,7 @@ function convertInputItem(
   systemParts: string[],
   unknownTypes: Set<string>,
   leading: boolean,
+  replay: ReasoningReplay,
 ): ClaudeMessage | undefined {
   // 工具投递项(code mode):工具已由 collectTools 取走,这里显式吞掉。它带
   // role:'developer',若被下面的 message 分支接住会把整个工具集当 system 文本灌进去。
@@ -203,13 +206,31 @@ function convertInputItem(
     };
   }
 
-  // The plaintext summary is kept as an (unsigned) assistant thinking block so
-  // the Claude-side shape stays faithful; the Kiro converter only replays
-  // *signed* thinking natively (`reasoningContent`) and never stitches thinking
-  // into text, so this block does not reach the wire. Opaque encrypted_content
-  // has no Kiro input channel and is never decoded or substituted for missing
-  // plaintext. Summary-less items therefore stay absent.
+  // encrypted_content 是网关自己签发的信封(见 reasoning-envelope.ts)时还原成原生推理块,
+  // 由 Kiro converter 放进 `reasoningContent`。其它情况退回 summary:保留成无签名 thinking
+  // 块让 Claude 侧形态完整,但 Kiro converter 只回传带签名的推理、绝不拼成文本,所以它不上
+  // wire。认不出的 encrypted_content 不解码、也不拿来顶替缺失的明文。
   if (item.type === 'reasoning') {
+    if (item.encrypted_content !== undefined) {
+      const decoded = decodeReasoningEnvelope(item.encrypted_content, replay.modelId);
+      if (decoded.ok) {
+        replay.replayed += 1;
+        const r = decoded.reasoning;
+        return {
+          role: 'assistant',
+          content: [
+            'redactedContent' in r
+              ? { type: 'redacted_thinking', data: r.redactedContent }
+              : {
+                  type: 'thinking',
+                  thinking: r.reasoningText.text,
+                  signature: r.reasoningText.signature,
+                },
+          ],
+        };
+      }
+      replay.dropped[decoded.reason] += 1;
+    }
     const summary: string[] = [];
     if (Array.isArray(item.summary)) {
       for (const part of item.summary) {
@@ -507,9 +528,18 @@ export const NO_TOOL_CODEC: ResponsesToolCodec = {
   toolNamespaces: new Map<string, string>(),
 };
 
+/** 本请求 reasoning item 的回传统计;进 handler 那一行请求日志。 */
+export interface ReasoningReplay {
+  /** 当前请求映射后的上游 modelId;信封只在同模型下回传。 */
+  modelId: string | undefined;
+  replayed: number;
+  dropped: { foreign: number; malformed: number; model_mismatch: number };
+}
+
 export interface ResponsesConversion {
   payload: MessagesRequest;
   codec: ResponsesToolCodec;
+  reasoningReplay: ReasoningReplay;
 }
 
 export function convertResponsesRequest(req: ResponsesRequest): ResponsesConversion {
@@ -518,13 +548,24 @@ export function convertResponsesRequest(req: ResponsesRequest): ResponsesConvers
 
   const messages: ClaudeMessage[] = [];
   const unknownTypes = new Set<string>();
+  const reasoningReplay: ReasoningReplay = {
+    modelId: mapModel(req.model),
+    replayed: 0,
+    dropped: { foreign: 0, malformed: 0, model_mismatch: 0 },
+  };
   const input = req.input;
   if (typeof input === 'string') {
     messages.push({ role: 'user', content: input });
   } else if (Array.isArray(input)) {
     for (const item of input) {
       if (!item || typeof item !== 'object') continue;
-      const msg = convertInputItem(item, systemParts, unknownTypes, messages.length === 0);
+      const msg = convertInputItem(
+        item,
+        systemParts,
+        unknownTypes,
+        messages.length === 0,
+        reasoningReplay,
+      );
       if (msg) messages.push(msg);
     }
   }
@@ -570,5 +611,6 @@ export function convertResponsesRequest(req: ResponsesRequest): ResponsesConvers
         [...collected.namespaces].filter(([name]) => tools?.some((t) => t.name === name)),
       ),
     },
+    reasoningReplay,
   };
 }

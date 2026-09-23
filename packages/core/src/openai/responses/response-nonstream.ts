@@ -1,9 +1,8 @@
 /**
  * Responses API 非流式:Claude 归约结果 → Response 对象。
  *
- * output items:reasoning(有明文思维链时,summary 通道)+ message(有文本时)+ 每个
- * tool_use 一个 function_call item。GPT 加密 reasoning 使 reasoningText 空 → 不产
- * reasoning item。usage 用原始 token(不经 buildClaudeUsagePayload);plugin 的
+ * output items:reasoning(有明文思维链时走 summary 通道;推理往返开启时带 `encrypted_content`,
+ * GPT 的摘要为空)+ message(有文本时)+ 每个 tool_use 一个 function_call item。usage 用原始 token(不经 buildClaudeUsagePayload);plugin 的
  * `addExtension` 扩展经 `extensions` 参内嵌进 usage(只搬扩展、不套 override,守 #16)。
  */
 
@@ -11,6 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { type ReducedAttempt, reducedReasoning } from '../../claude/non-stream-reduce.js';
 import { mergeUsageExtensions, type PluginUsageExtensions } from '../../claude/stream.js';
 import { NO_FREEFORM_TOOLS, unwrapFreeformInput } from '../freeform-tool.js';
+import { encodeReasoningEnvelope } from './reasoning-envelope.js';
 import type { ResponsesObject, ResponsesOutputItem, ResponsesUsage } from './types.js';
 import { NO_TOOL_NAMESPACES } from './types.js';
 
@@ -48,6 +48,8 @@ export function buildResponsesObject(args: {
   customToolNames?: ReadonlySet<string>;
   /** 工具名 → namespace(请求侧收集);流式侧同一分派见 response-stream.ts。 */
   toolNamespaces?: ReadonlyMap<string, string>;
+  /** 非空 = 推理往返开启:Claude 签名 / GPT 密文装进 `encrypted_content`(见 reasoning-envelope.ts)。 */
+  reasoningModelId?: string;
 }): ResponsesObject {
   const {
     reduced,
@@ -58,19 +60,33 @@ export function buildResponsesObject(args: {
     extensions,
     customToolNames = NO_FREEFORM_TOOLS,
     toolNamespaces = NO_TOOL_NAMESPACES,
+    reasoningModelId,
   } = args;
 
   const output: ResponsesOutputItem[] = [];
   const incompleteDetails = responsesIncompleteDetails(reduced.stopReason);
 
   // reasoning 先于 message/function_call(协议顺序)。Claude 明文思维链经 summary 通道
-  // surface;GPT 加密 reasoning 使 reasoningText 保持空 → 不产 item(与流式惰性开对齐)。
+  // surface;GPT 加密 reasoning 使 reasoningText 保持空 → 往返未开时不产 item(与流式对齐)。
+  // 信封里的明文只取原生 `reasoningText`:签名只覆盖它,legacy `<thinking>` 没有签名。
   const reasoning = reducedReasoning(reduced);
-  if (reasoning) {
+  const envelope =
+    reasoningModelId && reduced.reasoningSignature
+      ? encodeReasoningEnvelope(
+          {
+            reasoningText: { text: reduced.reasoningText, signature: reduced.reasoningSignature },
+          },
+          reasoningModelId,
+        )
+      : reasoningModelId && reduced.redactedReasoning
+        ? encodeReasoningEnvelope({ redactedContent: reduced.redactedReasoning }, reasoningModelId)
+        : undefined;
+  if (reasoning || envelope) {
     output.push({
       id: `rs_${uuidv4().replace(/-/g, '')}`,
       type: 'reasoning',
-      summary: [{ type: 'summary_text', text: reasoning }],
+      summary: reasoning ? [{ type: 'summary_text', text: reasoning }] : [],
+      ...(envelope ? { encrypted_content: envelope } : {}),
     });
   }
 

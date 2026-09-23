@@ -72,6 +72,7 @@ export function createPostChatCompletions(deps: PostMessagesDeps) {
       message_count: oaiReq.messages?.length ?? 0,
       tool_count: oaiReq.tools?.length ?? 0,
       reasoning_effort: oaiReq.reasoning_effort,
+      has_session_key: oaiReq.prompt_cache_key !== undefined,
     });
 
     // OpenAI → Claude MessagesRequest（reasoning_effort 已在此映射成
@@ -94,6 +95,9 @@ export function createPostChatCompletions(deps: PostMessagesDeps) {
         rejectUnsupportedDocuments: deps.rejectUnsupportedDocuments,
         toolDescriptionMaxLen: deps.toolDescriptionMaxLen,
         toolTextRegistry: rescueRegistry,
+        session: oaiReq.prompt_cache_key
+          ? { key: oaiReq.prompt_cache_key, subagent: false }
+          : undefined,
       });
     } catch (e) {
       if (e instanceof ConversionError) {

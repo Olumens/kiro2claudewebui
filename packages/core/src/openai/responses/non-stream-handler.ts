@@ -26,6 +26,8 @@ export async function handleResponsesNonStreamRequest(
   emptyStreamRetries = 0,
   rescueRegistry: ToolTextRegistry | undefined,
   codec: ResponsesToolCodec,
+  /** 非空 = 推理往返开启(见 response-nonstream.ts `buildResponsesObject`)。 */
+  reasoningModelId?: string,
 ): Promise<MessageHandlerResult> {
   return runOpenAiNonStream(
     provider,
@@ -48,6 +50,7 @@ export async function handleResponsesNonStreamRequest(
         extensions,
         customToolNames: codec.customToolNames,
         toolNamespaces: codec.toolNamespaces,
+        reasoningModelId,
       }),
     codec.customToolNames,
   );
