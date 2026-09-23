@@ -3,7 +3,7 @@
  *
  * 产出 Claude 内部请求对象后,交给现有 `convertRequest`(claude/converter.ts)
  * 复用全部下游处理:历史构建、tool_use/tool_result 配对校验、native
- * reasoning.effort 注入、envState 回填、身份覆写等。**不重复**这些逻辑。
+ * reasoning.effort 注入、会话身份映射、身份覆写等。**不重复**这些逻辑。
  *
  * 映射要点:
  *   - system/developer 消息 → `system[]`(developer 是 GPT 对 system 的改名)。
@@ -11,8 +11,8 @@
  *   - assistant.tool_calls → tool_use 块(arguments 字符串 JSON.parse → input)。
  *   - tool 消息 → user 消息带 tool_result 块(tool_call_id → tool_use_id)。
  *   - tools[].function → {name,description,input_schema}。tool_choice='none' → 丢 tools。
- *   - reasoning_effort(minimal→low,其余透传) → thinking(adaptive)+output_config.effort
- *     → 经 resolveEffort 出 effort(顶层 additionalModelRequestFields)。缺省不注入。
+ *   - reasoning_effort → thinking + output_config.effort(见 `reasoningConfigFromEffort`),
+ *     再经 converter 落到顶层 additionalModelRequestFields;缺省按模型默认。
  */
 
 import type {
@@ -38,30 +38,23 @@ export const REMOTE_IMAGE_PLACEHOLDER =
   'not remote URLs, so the image was not delivered to the model.]';
 
 /**
- * OpenAI reasoning_effort → Kiro effort 等级字符串(供 output_config.effort)。
- * Chat Completions 与 Responses 两个端点共用(单一真相源)。
+ * OpenAI `reasoning_effort` / `reasoning.effort` → Messages 的 `thinking` + `output_config`。
+ * Chat Completions 与 Responses 两个端点共用(单一真相源):`none` → `disabled`;`minimal` → low;
+ * low…max 透传;缺省或未知取值 → 两者皆 undefined,由 converter 按模型默认处理(同 KAS)。
  */
-export function mapReasoningEffort(effort: string | undefined): string | undefined {
-  if (!effort) return undefined;
-  const e = effort.toLowerCase();
-  if (e === 'minimal') return 'low';
-  if (e === 'low' || e === 'medium' || e === 'high' || e === 'xhigh' || e === 'max') return e;
-  return undefined; // 未知取值:不注入,走 baseline
-}
-
-/**
- * Kiro effort 等级 → MessagesRequest 的 reasoning 注入(adaptive thinking +
- * output_config.effort)。effort 缺省 → 两者皆 undefined(走 baseline)。
- * Chat 与 Responses 两端共用;effort **完全**由 output_config.effort 决定。
- */
-export function buildReasoningConfig(
+export function reasoningConfigFromEffort(
   effort: string | undefined,
 ): Pick<MessagesRequest, 'thinking' | 'output_config'> {
-  if (!effort) return { thinking: undefined, output_config: undefined };
-  return {
-    thinking: { type: 'adaptive' },
-    output_config: { effort },
-  };
+  const e = effort?.toLowerCase();
+  if (e === 'none') return { thinking: { type: 'disabled' }, output_config: undefined };
+  const level =
+    e === 'minimal'
+      ? 'low'
+      : e === 'low' || e === 'medium' || e === 'high' || e === 'xhigh' || e === 'max'
+        ? e
+        : undefined;
+  if (!level) return { thinking: undefined, output_config: undefined };
+  return { thinking: { type: 'adaptive' }, output_config: { effort: level } };
 }
 
 /**
@@ -85,7 +78,7 @@ export function buildClaudeTool(name: string, description: unknown, parameters: 
  * 工具结果打包进单条 user 消息)。OpenAI Chat 的 `tool` 消息、Responses 的
  * `function_call_output` item 都是**每结果一条**独立消息。convertRequest 自己也把
  * 连续 user 消息当同一轮合并(history 走 mergeUserMessages,末尾连串整体成
- * currentMessage),所以这一步不再是多轮语义的前提;保留它是让交给 convertRequest
+ * currentMessage),所以这一步不是多轮语义的前提;它让交给 convertRequest
  * 的 MessagesRequest 与真实 Anthropic 客户端同形——一个 user 轮就是一条消息——
  * Messages 侧的观测(`current_turn_message_count`)与 fixture 都按这个形态写。两端共用。
  */
@@ -266,10 +259,7 @@ export function convertOpenAiRequest(req: ChatCompletionRequest): MessagesReques
   // 仅 advisory:上游 Kiro 无 tool_choice 通道,无法强制,照常转发 tools。
   const tools = req.tool_choice === 'none' ? undefined : convertTools(req.tools);
 
-  // reasoning_effort → adaptive thinking + output_config.effort(→ reasoning.effort)
-  const { thinking, output_config } = buildReasoningConfig(
-    mapReasoningEffort(req.reasoning_effort),
-  );
+  const { thinking, output_config } = reasoningConfigFromEffort(req.reasoning_effort);
 
   // 上游 wire 不含 max_tokens,仅用于 token 计数/占位;取 OpenAI 两个别名之一或默认。
   const max_tokens = req.max_completion_tokens ?? req.max_tokens ?? 32000;

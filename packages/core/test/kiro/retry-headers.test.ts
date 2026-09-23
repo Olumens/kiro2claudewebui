@@ -116,7 +116,7 @@ describe('不走 executor 的端点:差异只在参数里', () => {
     applyRetryHeaders(headers, 'inv-1', 1, { maxAttempts: 1, kiroAttemptHeader: false });
 
     expect(headers['amz-sdk-request']).toBe('attempt=1; max=1');
-    // 没有该端点的抓包证据 → 不发,别顺手补一个未经实测的头
+    // 没有该端点的抓包证据 → 不发,别顺手补一个没抓到过的头
     expect(headers['x-kiro-attempt']).toBeUndefined();
   });
 

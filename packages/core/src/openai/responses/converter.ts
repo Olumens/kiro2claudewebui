@@ -9,7 +9,7 @@
  * ★ **code mode**(踩坑「Codex code mode」):Codex 对内部已知的模型名把工具挪进
  * `input` 的 `additional_tools` item,顶层 `tools` 与 `instructions` 双双消失。
  * 工具来源因此是**两处并集**(顶层 + additional_tools),判别只看字段在不在、
- * **不看模型名**。新版 Codex 还会把工具再折进一层 `functions` namespace 容器,展开
+ * **不看模型名**。Codex 0.147+ 还会把工具再折进一层 `functions` namespace 容器,展开
  * 规则见 `expandNamespaces`——漏展开 = 零工具上送、模型永远不调工具。
  * 其中 `type:"custom"` 的 freeform 工具上游没有对应通道,包成
  * 单 `input` 字符串字段的 JSON 工具转发(见 FREEFORM_TOOL_SCHEMA);它们的名字必须
@@ -17,6 +17,7 @@
  */
 
 import { mapModel } from '../../claude/converter.js';
+import { decodeReasoningEnvelope } from '../../claude/reasoning-envelope.js';
 import type {
   Message as ClaudeMessage,
   ContentBlock,
@@ -26,18 +27,16 @@ import type {
 import { getLogger } from '../../shared/logger.js';
 import {
   buildClaudeTool,
-  buildReasoningConfig,
   coalesceToolResultMessages,
-  mapReasoningEffort,
   parseDataUri,
   REMOTE_IMAGE_PLACEHOLDER,
+  reasoningConfigFromEffort,
 } from '../converter.js';
 import {
   FREEFORM_ADAPTATION_NOTE,
   FREEFORM_TOOL_SCHEMA,
   wrapFreeformInput,
 } from '../freeform-tool.js';
-import { decodeReasoningEnvelope } from './reasoning-envelope.js';
 import type {
   ResponsesAgentMessageItem,
   ResponsesContentPart,
@@ -76,6 +75,44 @@ function partsText(content: string | ResponsesContentPart[]): string {
     }
   }
   return parts.join('\n');
+}
+
+/**
+ * Codex multi-agent:子 agent 完成后,Codex 在父线程紧跟 `wait` 的工具输出插一条只含
+ * `<subagent_notification>…</subagent_notification>` 的 user 消息(0.156.1 实测)。它是客户端生成的
+ * 通知,不是新的用户输入:kiro-cli 里子 agent 的结果是 `invoke_sub_agent` 的 tool result,父会话 acid
+ * 不变(2.23.1 抓包)。所以把它并进前一条工具结果消息,落入「带 tool_result 的 user 消息是工具循环的
+ * 延续」;这两条在 Kiro 层本来就合并上送,模型所见不变。只认「整条都是通知 + 前一条是工具结果」,
+ * 其余原样——Codex 的约定只在 Responses 适配层生效,不进 Messages / Chat 共用的轮次规则。
+ */
+const SUBAGENT_NOTIFICATION = /^<subagent_notification>[\s\S]*<\/subagent_notification>$/;
+
+function blocksOf(content: unknown): ContentBlock[] {
+  return typeof content === 'string'
+    ? [{ type: 'text', text: content }]
+    : (content as ContentBlock[]);
+}
+
+function isSubagentNotification(msg: ClaudeMessage): boolean {
+  if (msg.role !== 'user') return false;
+  const blocks = blocksOf(msg.content);
+  return (
+    blocks.length > 0 &&
+    blocks.every(
+      (b) =>
+        b.type === 'text' &&
+        typeof b.text === 'string' &&
+        SUBAGENT_NOTIFICATION.test(b.text.trim()),
+    )
+  );
+}
+
+function carriesToolResult(msg: ClaudeMessage): boolean {
+  return (
+    msg.role === 'user' &&
+    Array.isArray(msg.content) &&
+    (msg.content as ContentBlock[]).some((b) => b?.type === 'tool_result')
+  );
 }
 
 /** content parts → Claude ContentBlock[](text/image)。 */
@@ -206,27 +243,18 @@ function convertInputItem(
     };
   }
 
-  // encrypted_content 是网关自己签发的信封(见 reasoning-envelope.ts)时还原成原生推理块,
-  // 由 Kiro converter 放进 `reasoningContent`。其它情况退回 summary:保留成无签名 thinking
-  // 块让 Claude 侧形态完整,但 Kiro converter 只回传带签名的推理、绝不拼成文本,所以它不上
-  // wire。认不出的 encrypted_content 不解码、也不拿来顶替缺失的明文。
+  // encrypted_content 是网关自己签发的信封(见 claude/reasoning-envelope.ts)时,这里只校验与计数,
+  // 信封原样作为 `redacted_thinking.data` 交给 Kiro converter——还原成 `reasoningContent` 只在那一处。
+  // 其它情况退回 summary:保留成无签名 thinking 块让 Claude 侧形态完整,但 Kiro converter 只回传
+  // 带签名的推理、绝不拼成文本,所以它不上 wire。认不出的 encrypted_content(含 null)不当推理上送。
   if (item.type === 'reasoning') {
-    if (item.encrypted_content !== undefined) {
+    if (typeof item.encrypted_content === 'string') {
       const decoded = decodeReasoningEnvelope(item.encrypted_content, replay.modelId);
       if (decoded.ok) {
         replay.replayed += 1;
-        const r = decoded.reasoning;
         return {
           role: 'assistant',
-          content: [
-            'redactedContent' in r
-              ? { type: 'redacted_thinking', data: r.redactedContent }
-              : {
-                  type: 'thinking',
-                  thinking: r.reasoningText.text,
-                  signature: r.reasoningText.signature,
-                },
-          ],
+          content: [{ type: 'redacted_thinking', data: item.encrypted_content }],
         };
       }
       replay.dropped[decoded.reason] += 1;
@@ -395,9 +423,8 @@ interface NamespacedTool {
  *   `functions.exec` 这种拼名反而不认)→ 展开后不记映射,响应侧照旧发裸名。
  * - 其余 namespace(subagent 的 `collaboration`)必须**记下映射**,响应侧把
  *   `namespace` 字段写回 `function_call`,否则客户端 router 按裸名查不到 handler,
- *   一律回 `unsupported call`。⚠ 这里曾长期写着「绝不展开、网关侧无解」,**该结论
- *   2026-09-07 被四组对照实验推翻**(`tools/codex/README.md` subagent 节):真因就是
- *   少了这一个字段,补上后同一个调用立刻被受理并真的创建了子 agent。
+ *   一律回 `unsupported call`。2026-09-07 四组对照实验(`tools/codex/README.md`
+ *   subagent 节):缺的就是这一个字段,补上后同一个调用立刻被受理并真的创建了子 agent。
  *
  * 「是不是默认命名空间」在 wire 上没有字段可表达,只能按名字白名单认 `functions`。
  *
@@ -566,7 +593,13 @@ export function convertResponsesRequest(req: ResponsesRequest): ResponsesConvers
         messages.length === 0,
         reasoningReplay,
       );
-      if (msg) messages.push(msg);
+      if (!msg) continue;
+      const prev = messages.at(-1);
+      if (prev && isSubagentNotification(msg) && carriesToolResult(prev)) {
+        prev.content = [...(prev.content as ContentBlock[]), ...blocksOf(msg.content)];
+      } else {
+        messages.push(msg);
+      }
     }
   }
   // 每请求一行、按 type 去重(理由见 convertInputItem)。
@@ -585,9 +618,7 @@ export function convertResponsesRequest(req: ResponsesRequest): ResponsesConvers
       : collectTools(req);
   const { tools, customToolNames } = convertTools(collected.tools);
 
-  const { thinking, output_config } = buildReasoningConfig(
-    mapReasoningEffort(req.reasoning?.effort),
-  );
+  const { thinking, output_config } = reasoningConfigFromEffort(req.reasoning?.effort);
 
   const max_tokens = req.max_output_tokens ?? 32000;
 

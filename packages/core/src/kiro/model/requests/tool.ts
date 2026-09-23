@@ -24,21 +24,21 @@ export function defaultInputSchema(): InputSchema {
 /**
  * 工具执行结果。
  *
- * kiro-cli 2.21.1 实测形态（探针 `test/manual/kiro-cli-probe.ts` 驱动真实工具）：
+ * kiro-cli 实测形态(2.21.1 V2 探针 `test/manual/kiro-cli-probe.ts`;2.23.1 V3 抓包一致):
  * ```
  * 成功: { toolUseId, content:[{ text }] | [{ json:{…} }], status:"success" }
  * 失败: { toolUseId, content:[{ text }],                   status:"error"   }
  * ```
- * 两点与本项目的差异，都**已知且刻意保持现状**：
+ * 同 KAS 只用 `status` 区分,不发 `isError`。2026-09 对照实验(content 保持中性 "done",
+ * 只改 status / isError,问模型成败):luna 与 opus-5 各 4 种组合 × 3 次全部答 SUCCESS——
+ * 两个字段都不作为失败信号到达模型,判定靠正文,所以不发 isError 不丢信息。
  *
- * 1. **`isError` kiro-cli 根本不发**（只用 `status` 区分），我们两个都发，上游实测
- *    照收。不删的理由：无法从外部区分「上游忽略未知字段」与「上游读的就是
- *    isError」，删错则错误结果被当成成功喂给模型。要动先做对照实验（content 保持
- *    中性、只改 status/isError，看模型是否仍判为失败）。
- * 2. **`content[]` 上游支持 `{json}` 通道**（`execute_bash` 回
+ * 与 kiro-cli 已知且刻意保持的差异:
+ *
+ * 1. **`content[]` 上游支持 `{json}` 通道**（`execute_bash` 回
  *    `{json:{stdout,stderr,exit_status}}`），我们只产 `{text}`。可接受的降级：下游
  *    送来的 tool_result 本就是文本/blocks，结构化信息在进网关前已序列化过一次。
- * 3. **`content[]` 没有图片通道**：塞 Bedrock 风格的 `{image:{format,source:{bytes}}}`
+ * 2. **`content[]` 没有图片通道**：塞 Bedrock 风格的 `{image:{format,source:{bytes}}}`
  *    上游照样 200，但静默丢弃（2026-09-09 直连实测：模型说结果为空、输入 token 恰好
  *    少掉图片的量）。所以 tool_result 里的图只能提升到消息级 `images[]`，与 kiro-cli
  *    `fs_read` 的做法一致；归属只剩位置，`claude/converter.ts` 用三件套补回：
@@ -53,7 +53,6 @@ export interface ToolResult {
   toolUseId: string;
   content: Record<string, unknown>[];
   status?: string;
-  isError?: boolean;
 }
 
 export function toolResultSuccess(toolUseId: string, content: string): ToolResult {
@@ -61,7 +60,6 @@ export function toolResultSuccess(toolUseId: string, content: string): ToolResul
     toolUseId,
     content: [{ text: content }],
     status: 'success',
-    isError: false,
   };
 }
 
@@ -70,7 +68,6 @@ export function toolResultError(toolUseId: string, errorMessage: string): ToolRe
     toolUseId,
     content: [{ text: errorMessage }],
     status: 'error',
-    isError: true,
   };
 }
 

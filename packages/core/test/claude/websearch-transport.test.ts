@@ -55,6 +55,31 @@ function messageFromEvents(body: string) {
   return { events, blocks };
 }
 
+describe('WebSearch summary', () => {
+  it('carries every snippet in full: it is the only channel into the model context', async () => {
+    const snippet = `${'fact '.repeat(80)}END_OF_SNIPPET`;
+    const { res } = await run(
+      { ...request, stream: false },
+      {
+        result: {
+          isError: false,
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                results: [{ title: 't', url: 'https://a.example', snippet }],
+              }),
+            },
+          ],
+        },
+      },
+    );
+    const content = res.json().content as Array<{ type: string; text?: string }>;
+    const summary = content.filter((b) => b.type === 'text').at(-1)?.text ?? '';
+    expect(summary).toContain(snippet);
+  });
+});
+
 describe('WebSearch transport and failure semantics', () => {
   it.each([
     true,

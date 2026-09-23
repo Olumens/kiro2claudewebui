@@ -39,7 +39,7 @@ flowchart LR
 ```
 
 - **认证**——kiro-cli device code flow(Builder ID / IAM Identity Center),见 [kiro.dev 文档](https://kiro.dev/docs/cli/authentication/)
-- **上游**——`POST runtime.<region>.kiro.dev/generateAssistantResponse`,请求 Smithy awsJson1.0、响应 AWS Event Stream;WebSearch 走 `/mcp`
+- **上游**——`POST runtime.<region>.kiro.dev/`,请求 Smithy awsJson1.0、按 `x-amz-target` 区分操作:对话走 `GenerateAssistantResponse`(响应 AWS Event Stream),WebSearch 走 `InvokeMCP`
 - **存储**——复用 kiro-cli 的 SQLite 凭据,token 到期就地刷新
 
 ## 快速开始
@@ -124,20 +124,22 @@ pnpm check       # biome format + lint(不写盘)
 pnpm run ci      # biome ci + typecheck + test
 ```
 
-pnpm workspace,Node ≥ 22 / TypeScript / ES Modules。husky pre-commit 强制 `biome check + typecheck + vitest`,`pnpm install` 后自动生效;提交遵循 [Conventional Commits](https://www.conventionalcommits.org/),细节见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+pnpm workspace,Node ≥ 22 / TypeScript / ES Modules。husky pre-commit 强制 `biome check + typecheck + vitest + markdownlint`,`pnpm install` 后自动生效;提交遵循 [Conventional Commits](https://www.conventionalcommits.org/),细节见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ## 已知限制
 
 网关只能修上游 wire 与协议翻译层的问题;下面这些在链路里仍然存在,单测全绿不等于会话无损:
 
-- **system prompt 只能以 user 级权重进模型,身份覆写因此不可靠**:Kiro wire 没有 system 字段,`additionalContext` 这类结构化字段上游收下即丢(2026-09-10 实测:塞进去的内容模型一概不知、input token 不变)。网关把 system 文本折进首条 user 消息正文,不再伪造任何 assistant 轮次;但它压不过上游自己的系统提示,直接问「你是谁」时模型多半自报 Kiro / AWS。`KIRO2CLAUDE_IDENTITY_OVERRIDE` 追加的身份指令实测 opus-5 只有约三成、opus-4-6 0/2 生效,换措辞与位置都改不了,故**默认关**。长上下文 + 真实工具调用的 A/B(24 会话、352 次调用)显示这两种注入方式对工具调用与任务完成率没有可测差异。
-- **continuation 文案偶发进正文**:请求以 assistant 结尾时(prefill 或上轮中断的续接),Kiro 只接受 user 作为当前消息,网关把该 assistant 内容留在历史并追加一句续写指令。实测 7 次里 2 次模型把指令句尾复述进可见输出。相比修复前(prefill 场景 3/3 破损)是净改进,但不到 100%,也不是字节级 prefill。
+- **system prompt 只能以 user 级权重进模型,身份覆写因此不可靠**:Kiro wire 没有 system 字段,`additionalContext` 这类结构化字段上游收下即丢(2026-09-10 实测:塞进去的内容模型一概不知、input token 不变)。网关把 system 文本折进首条 user 消息正文,不造任何 assistant 轮次;但它压不过上游自己的系统提示,直接问「你是谁」时模型多半自报 Kiro / AWS。`KIRO2CLAUDE_IDENTITY_OVERRIDE` 追加的身份指令实测 opus-5 只有约三成、opus-4-6 0/2 生效,换措辞与位置都改不了,故**默认关**。长上下文 + 真实工具调用的 A/B(24 会话、352 次调用)显示,折进正文与另起合成轮次相比,工具调用与任务完成率没有可测差异。
+- **continuation 文案偶发进正文**:请求以 assistant 结尾时(prefill 或上轮中断的续接),Kiro 只接受 user 作为当前消息,网关把该 assistant 内容留在历史并追加一句续写指令。实测 7 次里 2 次模型把指令句尾复述进可见输出;这也不是字节级 prefill。
 - **客户端省略的历史无法还原**:上轮的 thinking、被自动压缩掉的内容不再随请求发来时,网关没有跨请求存储,不擅自复活。Claude Code 自动压缩(实测约第 50 个请求触发)保留主线任务与未完成项,但会丢部分 API 签名、返回结构、错误码拼写等细节。
-- **GPT 推理不可读,只在 Responses 上回传**:上游只给加密 blob,网关不伪装成明文。客户端声明 `include:["reasoning.encrypted_content"]` 时(Codex 默认如此),推理装进 `encrypted_content` 下一轮原样回传上游;Chat Completions 与 Messages 没有对应通道,GPT 推理不回传。
-- **Claude Fable 5.1 只对开通的账号可用**:Kiro 只向启用了 model governance 的 Enterprise 组织灰度(仅 `us-east-1`),账号未开通时上游拒收。网关按 Anthropic 规格处理(thinking 常开,`thinking:{type:"disabled"}` 不下发,走上游默认 adaptive);`kiro_derived` 暂不做缓存反演(`unknown_model` 透传:cache 字段为 0、成本按 `credits × 0.04`),待真实 credit 数据校准后再加。
-- **旧模型不做 thinking 控制**:opus-4.6 及以下、haiku 没有原生 reasoning,网关不注入提示词也不发字段,`thinking` / `-thinking` 后缀对它们无效,走上游默认。
+- **GPT 推理不可读,Chat Completions 上不回传**:上游只给占位文本和密文签名,网关不把它当明文展示。Messages 下发为 `redacted_thinking`、Responses 在声明 `include:["reasoning.encrypted_content"]` 时(Codex 默认如此)放进 `encrypted_content`,下一轮都原样回传上游;Chat Completions 没有对应通道,GPT 推理不回传。
+- **Claude Fable 5.1 只对开通的账号可用**:Kiro 只向启用了 model governance 的 Enterprise 组织灰度(仅 `us-east-1`),账号未开通时上游拒收。网关按 Anthropic 规格处理(thinking 常开,`thinking:{type:"disabled"}` 不下发,走上游默认 adaptive);`kiro_derived` 暂不做缓存反演(`unknown_model` 透传:cache 字段为 0、成本按 `credits × 0.04`)——Kiro 标 6x,偏离其它 Claude 模型的倍率 / 单价比,按标价反演会低估 `cache_read`。
+- **旧模型不做 thinking 控制**:opus-4.6 及以下、sonnet-4.5、haiku 没有原生 reasoning,网关不注入提示词也不发字段,`thinking` / `-thinking` 后缀对它们无效,走上游默认。
 - **无签名的历史 thinking 不回传**:thinking 块要带上游给的 `signature` 才走原生 `reasoningContent`;无签名的(旧模型文本解码、不带 `encrypted_content` 的 reasoning summary)丢弃,不拼成文本;签名失效时网关剥掉全部历史推理重发一次。
 - **多张图片只能靠位置归属**:Kiro wire 只有消息级 `images[]`,tool_result 里放图上游静默丢弃、正文是纯字符串,所以「这张图属于哪个工具调用」在 wire 上表达不了。网关做了三件事:tool_result 按 tool_use 顺序规范化、tool_result 内占位符带序号、消息里 ≥2 张 tool_result 图时在正文前置一行 `[Attached images, in order: image k = …]` 图例。2026-09-09 真实上游实测:6 个并行 Read 各回一张图,无图例时两个模型 4/4 错位,有图例 4/4 全对;Docker 里真实 Claude Code / Codex 读 4–6 张不同数字图能正确对应文件。仍不可控的是模型自己的判断:GPT-5.6 对两张字节相同的图稳定答「1 张」(token 计数证明两张都送到了),以及对低分辨率点阵数字偶发误读一位。真实复跑:`packages/core/test/manual/multi-image-attribution-probe.mjs`(API)与 `multi-image-cli-probe.mjs`(Docker 真 CLI,计费)。
+- **超长工具描述会被截断**:单个工具的 description 超过 `KIRO2CLAUDE_TOOL_DESCRIPTION_MAX_LEN`(默认 32768 字符)时截掉尾部并打 warn,防止单个畸形描述吃掉上下文窗口;已知最大的合法工具(Workflow)远低于此,需要时调大。工具名超过 63 字符(上游硬限制)会改写成「前缀 + 哈希」发给模型,回给客户端时还原。
+- **tool_result 的 `is_error` 不会到达模型**:网关同 kiro-cli 发 `status:"error"`,但上游不把它当失败信号交给模型(对照实验:正文保持中性、只改 status / isError,luna 与 opus-5 全部答成功),成败只能从正文判断。Claude Code 的报错结果正文自带 `<tool_use_error>` / `Exit code` 等信息,不受影响;只靠 `is_error` 标记、正文中性的客户端会被当成成功。
 - **错误前已输出的文字留在客户端历史**:上游中途报错时,之前已流出的正文客户端已经收到并保存;保留原文不等于它经过验证。
 - **Claude Code 2.1.263 的 Unicode 转义改写(客户端侧)**:工具参数里字面的 `\u0000` / `\u000a` JSON 转义序列会被 CLI 还原成真实 NUL / LF,导致 Bash 参数校验失败、Write 写坏源码。绕过网关直连 Anthropic 同样复现,整块 / 7 字符 / 逐字符 / `\u005c` 等价编码四种分片方式无一幸免。网关不做双重转义、不改写工具命令。零上游复现:`packages/core/test/manual/claude-unicode-input-probe.mjs`。
 

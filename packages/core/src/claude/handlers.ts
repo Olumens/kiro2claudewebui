@@ -20,8 +20,8 @@ import { countAllTokens } from '../token.js';
 import {
   ConversionError,
   type ConversionResult,
-  clientModelHasEncryptedReasoning,
   convertRequest,
+  responseThinkingEnabled,
   toKiroRequest,
 } from './converter.js';
 import { captureEmptyRequest, type MessageHandlerResult } from './empty-capture.js';
@@ -37,7 +37,7 @@ import {
 import { handleStreamRequest } from './stream-handler.js';
 import { buildToolTextRegistry } from './tool-call-text.js';
 import type { CountTokensResponse, MessagesRequest } from './types.js';
-import { createErrorResponse, isThinkingEnabled } from './types.js';
+import { createErrorResponse } from './types.js';
 import { handleWebsearchRequest, hasWebSearchTool } from './websearch.js';
 
 // ============================================================================
@@ -130,12 +130,14 @@ export function createPostMessages(deps: PostMessagesDeps) {
 
     // Convert request
     let conversionResult: ConversionResult;
+    const agentId = request.headers['x-claude-code-agent-id'];
     try {
       conversionResult = convertRequest(payload, {
         identityOverride: deps.identityOverride,
         rejectUnsupportedDocuments: deps.rejectUnsupportedDocuments,
         toolDescriptionMaxLen: deps.toolDescriptionMaxLen,
         toolTextRegistry: rescueRegistry,
+        claudeCodeAgentId: typeof agentId === 'string' && agentId ? agentId : undefined,
       });
     } catch (e) {
       if (e instanceof ConversionError) {
@@ -173,13 +175,8 @@ export function createPostMessages(deps: PostMessagesDeps) {
       payload.tools,
     );
 
-    // 仅 GPT(加密 reasoning)从响应开始就关掉 legacy `<thinking>` 解码；运行时 native
-    // event 也会锁模式，但静态判定还能覆盖 redacted event 缺失/晚到。Claude 原生
-    // reasoning(明文)不纳入，且需 thinkingEnabled=true 维持 thinking→text 块顺序。
     const extractThinking =
-      deps.extractThinking &&
-      isThinkingEnabled(payload.thinking) &&
-      !clientModelHasEncryptedReasoning(payload.model);
+      deps.extractThinking && responseThinkingEnabled(payload.thinking, payload.model);
     const toolNameMap = conversionResult.toolNameMap;
 
     let result: MessageHandlerResult;

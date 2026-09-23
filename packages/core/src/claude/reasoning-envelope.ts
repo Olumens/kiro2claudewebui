@@ -1,10 +1,13 @@
 /**
- * Responses `reasoning.encrypted_content` ⇄ Kiro `reasoningContent` 的往返信封。
+ * 推理往返信封:Kiro `reasoningContent` ⇄ 客户端可原样带回的不透明字符串(Responses 的
+ * `reasoning.encrypted_content`、Messages 的 `redacted_thinking.data`)。
  *
  * kiro-cli 每轮都把上一轮推理原样放回 history 的 `assistantResponseMessage.reasoningContent`
- * (GPT `{redactedContent}`、Claude `{reasoningText:{text,signature}}`)。Responses 协议里对应的
- * 通道只有 reasoning item 的 `encrypted_content`:客户端请求时带 `include:["reasoning.encrypted_content"]`,
- * 下一轮就把它原样放回 `input`。网关把 Kiro 形态装进信封下发,回程拆开还原。
+ * (V3 下 GPT 与 Claude 都是 `{reasoningText:{text,signature}}`;V2 下 GPT 的 `{redactedContent}` 也认)。
+ * 客户端协议里能原样带回不透明数据的通道:Responses 的 reasoning item `encrypted_content`
+ * (声明 `include:["reasoning.encrypted_content"]` 时)与 Messages 的 `redacted_thinking.data`
+ * (GPT 的推理只走这里,见 stream.ts `opaqueReasoning`)。网关把 Kiro 形态装进信封下发,
+ * 回程拆开还原。
  *
  * ★ 会话隔离:网关不保存任何推理状态,信封只存在于客户端自己的历史里,跨会话无从串起。
  * ★ 模型绑定:信封记下签发它的上游 modelId,会话中途换模型时旧推理不回传——签名 / 密文
@@ -12,9 +15,15 @@
  * ★ 认不出的一律丢弃:真 OpenAI 的密文、被改坏的信封都不当推理上送。
  */
 
-import type { ReasoningContent } from '../../kiro/model/requests/conversation.js';
+import type { ReasoningContent } from '../kiro/model/requests/conversation.js';
 
-const PREFIX = 'k2c.r1.';
+/**
+ * 格式:`k2c.r2.` + JSON `{m, r}`。不再套 base64——`r` 里的签名 / 密文本身就是 base64,再编一层
+ * 只会让客户端每轮多回传约 1/3 字节。`k2c.` 开头但版本不认得的算 malformed(丢弃),绝不当外来的
+ * redacted 数据原样上送。
+ */
+const FAMILY = 'k2c.';
+const PREFIX = 'k2c.r2.';
 
 interface Envelope {
   m: string;
@@ -27,18 +36,19 @@ export type ReasoningEnvelopeResult =
 
 export function encodeReasoningEnvelope(reasoning: ReasoningContent, modelId: string): string {
   const envelope: Envelope = { m: modelId, r: reasoning };
-  return PREFIX + Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64url');
+  return PREFIX + JSON.stringify(envelope);
 }
 
 export function decodeReasoningEnvelope(
   value: unknown,
   modelId: string | undefined,
 ): ReasoningEnvelopeResult {
-  if (typeof value !== 'string' || !value.startsWith(PREFIX))
+  if (typeof value !== 'string' || !value.startsWith(FAMILY))
     return { ok: false, reason: 'foreign' };
+  if (!value.startsWith(PREFIX)) return { ok: false, reason: 'malformed' };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.from(value.slice(PREFIX.length), 'base64url').toString('utf8'));
+    parsed = JSON.parse(value.slice(PREFIX.length));
   } catch {
     return { ok: false, reason: 'malformed' };
   }

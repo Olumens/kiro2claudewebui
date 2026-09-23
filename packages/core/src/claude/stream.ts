@@ -9,12 +9,13 @@ import type { Event, KiroMeteringData } from '../kiro/model/events/base.js';
 import { type HookBus, UsageFinishEventImpl } from '../plugin-host/index.js';
 import { getLogger } from '../shared/logger.js';
 import { getRequestContext } from '../shared/request-context.js';
-import { resolveContextUsage } from './converter.js';
+import { clientModelHasEncryptedReasoning, resolveContextUsage } from './converter.js';
 import {
   type LegacyThinkingBoundaryReason,
   LegacyThinkingDecoder,
   type LegacyThinkingDecoderItem,
 } from './stream/legacy-thinking-decoder.js';
+import { OpaqueReasoningAccumulator, redactedThinkingBlock } from './stream/opaque-reasoning.js';
 import {
   type DetectorItem,
   ToolCallTextDetector,
@@ -51,7 +52,7 @@ export interface ClaudeUsagePayload {
  * （累计计数器照进），只是扩展输出不落到 `/api` 的 wire 上。默认（无标记）= 完整扩展。
  *
  * **单一真相源**：Claude（`buildClaudeUsagePayload`）与 OpenAI 两协议共用此函数，
- * strip 语义不再各写一份。注意此处只解析 `addExtension` 扩展；`overrideStandardField`
+ * strip 语义只有一份。注意此处只解析 `addExtension` 扩展；`overrideStandardField`
  * 的标准字段覆写不经此路（OpenAI 侧刻意不套用 override，守踩坑「OpenAI prompt_tokens」）。
  */
 /** plugin 注入的命名空间 usage 扩展（`addExtension` 通道）——`resolvePluginUsageExtensions` 的产物类型。 */
@@ -235,8 +236,8 @@ const BILLABLE_WORK_EVENT_KINDS = [
  * Error/Exception 帧是**确定性终止**(已开工 → 重发只会再烧一遍)还是**瞬时拒绝**
  * (零帧 → 重发几乎必然恢复,且无成本可烧)。
  *
- * ★ **不能**用 `hasContent()` 代替。GPT 的 reasoning 是加密的 `redactedContent`,
- * `processReasoningContent` 会整块丢弃(踩坑「GPT 完全相同上游」),于是一个已经烧掉数千帧 reasoning
+ * ★ **不能**用 `hasContent()` 代替。GPT 的 reasoning 不透明,不作为 thinking 产出(只进
+ * `opaqueReasoning` 供回传,踩坑「GPT 完全相同上游」),于是一个已经烧掉数千帧 reasoning
  * 的 GPT 流在 `hasContent()` 看来是「空」的 —— 按它决定要不要重试,正好会对最贵的
  * 那类失败重发请求。判据必须落在**上游发过什么帧**上,而不是我们向下游产出了什么。
  */
@@ -267,10 +268,9 @@ export interface ContentPresence {
  * 已发过 input 分片的,分片长度计入产出侧 → 此处为真,两种截断形态由此分开
  * (踩坑「截断 tool_use 必须阻止残缺调用到达客户端」)。
  *
- * ⚠ 两个 transport 与非流式 reducer 曾各自内联一份。**别再拷回去**:判空、commit
- * 与终态是同一个谓词的三面,多一处拼法就多一条静默分叉的通道——流式/非流式对同一
- * 份上游字节给出不同 status 的事故,这个仓库已经出过两次(2026-07 空 tool_use、
- * 2026-08 空 thinking 块)。
+ * ⚠ 两个 transport 与非流式 reducer 都只调它,**别内联**:判空、commit 与终态是同一个
+ * 谓词的三面,多一处拼法就多一条静默分叉的通道——流式/非流式对同一份上游字节给出
+ * 不同 status(2026-07 空 tool_use、2026-08 空 thinking 块两次事故都是这样来的)。
  */
 export function computeHasContent(p: ContentPresence): boolean {
   return p.sawOutputBytes || p.thinkingExtracted || p.sawCompletedToolUse;
@@ -317,8 +317,8 @@ export function isMeteringLost(
 /**
  * 终态日志那对 metering 字段的唯一构造点。★ 不变式:两者**必须成对、且读同一份
  * eventCounts 快照**——只有 `metering_lost` 查不到丢的是哪一笔,只有 `kiro_metering`
- * 则漏账样本 grep 不出来。这条契约只能靠构造维持,散文维持不住(此前六处手写,补字段
- * 时漏掉了两条 error 分支)。
+ * 则漏账样本 grep 不出来。这条契约只能靠构造维持,散文维持不住:六处各自手写时,补字段
+ * 必漏一处。
  *
  * 调用点清单与判据见 `isMeteringLost` 头注释。**这不是「终态日志」的通用结构**:六个
  * 点的数据源是三种形状(StreamContext / reduced / 局部变量),别据此扩成大而全的
@@ -426,10 +426,10 @@ export function assertNever(x: never): never {
 /**
  * 选择空流文案。多次尝试仍空 = *确定性*空流(失败绑定在请求内容上,再重试
  * 只烧 credit)→ 提示压缩会话;单次尝试(retries=0)是瞬时空流 → 保留可重试
- * 文案。流式与非流式 handler 共用,阈值不再各写一份。
+ * 文案。流式与非流式 handler 共用,阈值只有一份。
  *
  * `deterministic` 让调用方**直接断言**确定性,不靠 attempts 倒推:截断的 tool_use
- * 帧一眼可判且不再消耗重试预算 → attempts 停在 1 → 只看次数会误退回「please
+ * 帧一眼可判且不消耗重试预算 → attempts 停在 1 → 只看次数会误退回「please
  * retry」,把用户引向那条已知无效的路。
  */
 export function selectEmptyUpstreamMessage(emptyAttempts: number, deterministic = false): string {
@@ -458,7 +458,7 @@ export function sseEventToString(e: SseEvent): string {
  *
  * ★ 红线:**绝不**把 `raw.write()` 的返回值当成上面那个 boolean 返回。它是 Node 的
  * **背压**信号(内部缓冲超过 highWaterMark → 应等 `'drain'` 再写),此时 socket 完全
- * 健康。历史实现直接 `return raw.write(chunk)`,于是所有调用点把「缓冲满」读成
+ * 健康。若直接 `return raw.write(chunk)`,所有调用点会把「缓冲满」读成
  * 「客户端断连」:读循环停止转发、终结段连 `message_stop` 都丢掉、上游仍 drain 到
  * EOF 全额计费,日志还把责任记给客户端。而缓冲只会被**大量字节**填满,所以这个误判
  * 精确地咬住最长最贵的那批响应 —— 生产实测被误判流的 `output_tokens` 中位数比真断连
@@ -832,12 +832,12 @@ export class StreamContext {
   sawReasoningContent: boolean;
   reasoningBlockIndex: number | undefined;
   /**
-   * GPT 的加密推理(`redactedContent`),只记录、不进 Claude SSE:Messages / Chat 的 wire
-   * 不变,由需要往返的协议(Responses 的 `encrypted_content`)自取。一条 Kiro 消息一个
-   * 推理槽位,多帧取最后一帧。⚠ GPT 的这一帧在 tool_use **之后**、响应末尾才到,
-   * 消费方只能在收尾时读。
+   * GPT 的推理(`{text:"...", signature}` 或 `{redactedContent}`)是不透明的:文本只是占位,
+   * 绝不作为 thinking 展示,但要原样保留供下一轮回传(见 `stream/opaque-reasoning.ts`)。只对 GPT
+   * 模型建;Claude 走 `processReasoningContent` 的明文 thinking 路径。
+   * ⚠ GPT 的这一帧在 tool_use **之后**、响应末尾才到,消费方只能在收尾时读 `opaqueReasoning`。
    */
-  redactedReasoning: string | undefined;
+  private readonly opaqueReasoningAcc: OpaqueReasoningAccumulator | undefined;
   /**
    * Raw kiro metering payload from upstream. Surfaced to plugins via the
    * UsageFinishEvent meta keys (`kiro.creditsUsed`, etc.); core itself does
@@ -870,7 +870,7 @@ export class StreamContext {
   /**
    * 上游在流中途发来的 Error / Exception 帧(非 ContentLength)。置位后由
    * handler 终结段判定 committed:已 commit → 发 in-band `error` 事件、未 commit
-   * → 发 502,绝不再静默截断成「看似完整的 message_stop」。原始 code/message
+   * → 发 502,绝不静默截断成「看似完整的 message_stop」。原始 code/message
    * 只在 case 里记日志,不进 wire(防泄漏)。processKiroEvent 看不到 committed,
    * 故置标志、由 handler 收口。
    */
@@ -878,7 +878,7 @@ export class StreamContext {
   /**
    * 上游出现过的未识别 event-type 字符串(去重)。前向兼容诊断:上游若新增
    * *带内容的* event-type,会在「完成」日志的 `unknown_event_types` 字段冒出来,
-   * 而非无声落入 Unknown 被丢。(`metadataEvent` 已是已知事件,见 `sawMetadata`。)
+   * 而非无声落入 Unknown 被丢。(`metadataEvent` 是已知事件,见 `sawMetadata`。)
    */
   readonly unknownEventTypes = new Set<string>();
 
@@ -907,7 +907,9 @@ export class StreamContext {
     this.legacyThinkingDecoder = thinkingEnabled ? new LegacyThinkingDecoder() : undefined;
     this.sawReasoningContent = false;
     this.reasoningBlockIndex = undefined;
-    this.redactedReasoning = undefined;
+    this.opaqueReasoningAcc = clientModelHasEncryptedReasoning(model)
+      ? new OpaqueReasoningAccumulator()
+      : undefined;
     this.kiroMeteringRaw = undefined;
     this.pendingUpstreamError = undefined;
     this.hookBus = hookBus;
@@ -968,6 +970,11 @@ export class StreamContext {
     return events;
   }
 
+  /** GPT 本次响应的不透明推理(收尾后读);非 GPT 模型恒为 undefined。 */
+  get opaqueReasoning() {
+    return this.opaqueReasoningAcc?.result;
+  }
+
   /** 事件类型计数快照（空流诊断日志用） */
   getEventCounts(): Record<string, number> {
     return Object.fromEntries(this.eventCounts);
@@ -1022,7 +1029,12 @@ export class StreamContext {
         return this.processAssistantResponse(event.content);
 
       case 'ReasoningContent':
-        if (event.redactedContent) this.redactedReasoning = event.redactedContent;
+        if (this.opaqueReasoningAcc) {
+          this.opaqueReasoningAcc.push(event);
+          // 不产出可见 thinking,也不算内容:只有 GPT 推理的响应仍按空流处理(契约见
+          // test/claude/empty-response-contract.test.ts「encrypted reasoning only」)。
+          return this.processReasoningContent('', undefined);
+        }
         return this.processReasoningContent(event.text, event.signature);
 
       case 'ToolUse':
@@ -1053,7 +1065,7 @@ export class StreamContext {
           error_message: event.errorMessage,
         });
         // 记下待发错误(含 retryable 分类),由 handler 终结段按 committed 状态明确
-        // 报错(in-band error 或 502/503),不再 `return []` 静默截断成 message_stop。
+        // 报错(in-band error 或 502/503),而非静默截断成 message_stop。
         this.recordUpstreamError(classifyUpstreamErrorEvent(event));
         return [];
 
@@ -1071,14 +1083,14 @@ export class StreamContext {
       }
 
       case 'Metadata':
-        // 只取「出现过」;它的 stopReason 不可信(带工具时也报 END_TURN),终态照旧
+        // 只取「出现过」;它的 stopReason 不可信(带工具时也报 END_TURN),终态
         // 由网关推断。错误路径也要吃到它:pendingUpstreamError 的过滤只拦内容帧。
         this.sawMetadata = true;
         return [];
 
       case 'Unknown':
-        // 未识别 event-type:记下类型名供「完成」日志观测(前向兼容),payload
-        // 无对应下游语义,不下发(与旧 default 行为一致,只是不再无声)。
+        // 未识别 event-type:payload 无对应下游语义、不下发,但类型名要记下供「完成」
+        // 日志观测(前向兼容),不能无声丢弃。
         this.unknownEventTypes.add(event.eventType);
         return [];
 
@@ -1118,7 +1130,7 @@ export class StreamContext {
    *     `signature_delta` 协议——透传给下游可用于 multi-turn thinking continuation
    *
    * 任意原生帧（含空/redacted）都锁定 native 模式、退掉 legacy decoder——GPT 的
-   * `extractThinking` 虽已由 `usesEncryptedNativeReasoning` 在 handler 侧静态关掉，
+   * `extractThinking` 虽已由 `clientModelHasEncryptedReasoning` 在 handler 侧静态关掉，
    * 这条运行时信号是万一模型别名漏判时的最后一道防线。
    *
    * ★ 但空帧只能作废**尚未落定**的 legacy 分类，两条边界不能越:
@@ -1127,7 +1139,8 @@ export class StreamContext {
    *      推进可见文本通道。开过块 = 分类已落定，没有内容的帧不足以推翻它。
    *   2. **绝不 flush 救援检测器**。那只在真要开 thinking block 时才需要（为了
    *      保住 wire order），在这里做会把跨帧的泄漏工具调用候选拦腰截断，本该
-   *      救回来的 tool_use 变成裸文本——而 redacted 帧的唯一来源恰恰是 GPT。
+   *      救回来的 tool_use 变成裸文本——而 GPT 的推理帧到这里一律是空帧
+   *      (见 `processKiroEvent`)。
    */
   private processReasoningContent(text: string, signature: string | undefined): SseEvent[] {
     const events: SseEvent[] = [];
@@ -1248,8 +1261,8 @@ export class StreamContext {
           // No need to set thinkingExtracted — the decoder cannot emit an end
           // without the matching start that already set it.
           if (this.thinkingBlockIndex !== undefined) {
-            // Preserve the historical empty terminal delta for downstream
-            // clients that use it as a final thinking flush signal.
+            // Empty terminal delta: downstream clients use it as a final
+            // thinking flush signal.
             events.push(this.createThinkingDeltaEvent(this.thinkingBlockIndex, ''));
             const stop = this.stateManager.handleContentBlockStop(this.thinkingBlockIndex);
             if (stop) events.push(stop);
@@ -1435,10 +1448,10 @@ export class StreamContext {
    * 有没有「宣告了却从未收到 `isComplete`」的 tool_use。**上游截断这件事的直接事实**,
    * 给 stream-handler 判定确定性空流用。
    *
-   * 它曾被 `stop_reason === 'tool_use'` 代替:空壳截断时终态恰好兜底成 `tool_use`,
-   * 于是两个模块被一条字符串巧合绑住——`generateFinalEvents` 一旦把这类终态改掉,
-   * handler 那边就静默失去识别能力、那批请求重新开始烧重试预算,而两处代码谁也看不出
-   * 依赖关系。问事实,别问终态。
+   * 别用 `stop_reason === 'tool_use'` 代替:空壳截断时终态恰好兜底成 `tool_use`,两个
+   * 模块会被一条字符串巧合绑住——`generateFinalEvents` 一旦把这类终态改掉,handler 那边
+   * 就静默失去识别能力、那批请求开始烧重试预算,而两处代码谁也看不出依赖关系。问事实,
+   * 别问终态。
    */
   hasIncompleteToolUse(): boolean {
     return this.pendingToolCalls.size > 0;
@@ -1538,7 +1551,7 @@ export class StreamContext {
     // (踩坑「截断 tool_use 必须阻止残缺调用到达客户端」)。
     //
     // 上游偶发「宣告 tool_use、发了几段 input 分片、却从未发 isComplete」就断流。
-    // 旧实现中,若此前已产出可见文本,流不判空 → 走正常终结段 → `closeOpenBlocks()` 补
+    // 若已产出可见文本,流不判空 → 走正常终结段;不拦的话 `closeOpenBlocks()` 补
     // content_block_stop、stop_reason 兜底成 `tool_use`,客户端拿到「看似完整、实则
     // JSON 残缺」的调用,解析必然失败(Claude Code 报 `InputValidationError: JSON
     // parse failed`,用户侧表现为「首次调用某工具参数错误、重试就好」)。
@@ -1550,14 +1563,15 @@ export class StreamContext {
     // ★ `hasContent()` 是**必要**守卫,不是保险:上游只发「有名字、零 input」的 tool
     // 帧时三项都不置位 → hasContent() 为假 → 那是确定性空流,由 stream-handler 单次
     // 定案、不耗重试预算(踩坑「空流有界重试」)。它问的是 `hasIncompleteToolUse()`
-    // 这个事实,不再依赖此处把终态留在 `tool_use`;但两种截断形态的**分工**不变:
-    // 有 input 分片的才走这里改 max_tokens。
+    // 这个事实,不依赖此处的终态;两种截断形态的**分工**:有 input 分片的才走这里改
+    // max_tokens。
     if (this.hasIncompleteToolUse() && this.hasContent()) {
       this.stateManager.setStopReasonIfUnset('max_tokens');
       // ★ 归因必须分开:是**我们**掐断的上游时,这条不能算上游故障。运维拿
       // `upstream truncated tool_use` 当「客户端报工具参数错误」的第一排查点
-      // (CLAUDE.md 速查表),自伤事件混进同一个 msg 会让那条 runbook 每次断连
-      // 都误报一次。故换 msg + 降级到 info,保留 self_inflicted 字段便于统计。
+      // (PITFALLS「客户端报 InputValidationError 怎么查」),自伤事件混进同一个 msg
+      // 会让那条 runbook 每次断连都误报一次。故换 msg + 降级到 info,保留
+      // self_inflicted 字段便于统计。
       const fields = {
         incomplete_tool_blocks: this.pendingToolCalls.size,
         tool_names: [...this.seenToolUseNames],
@@ -1611,11 +1625,31 @@ export class StreamContext {
       events.push(...this.createTextDeltaEvents(' '));
     }
 
+    // GPT 的不透明推理以 `redacted_thinking` 块下发(见 `redactedThinkingBlock`)。它晚于 tool_use
+    // 到达,只能排在已发的块之后;OpenAI 两个编码器不认这种块,由 Responses 另走 encrypted_content。
+    // 错误收尾(emitMessageTerminal=false)不发:那条响应本身不完整,不该进历史。
+    const opaque = this.opaqueReasoning;
+    const block =
+      emitMessageTerminal && opaque ? redactedThinkingBlock(opaque, this.model) : undefined;
+    if (block) {
+      events.push(...this.stateManager.closeOpenBlocks());
+      const idx = this.stateManager.nextBlockIndex();
+      events.push(
+        ...this.stateManager.handleContentBlockStart(idx, 'redacted_thinking', {
+          type: 'content_block_start',
+          index: idx,
+          content_block: block,
+        }),
+      );
+      const stop = this.stateManager.handleContentBlockStop(idx);
+      if (stop) events.push(stop);
+    }
+
     // Use contextUsageEvent input_tokens if available, otherwise estimated
     const finalInputTokens = this.contextInputTokens ?? this.inputTokens;
 
     // 物化一次:hook meta 与下面的 stream statistics 日志共用同一份快照。别在其中
-    // 一处改回直接读 `this.eventCounts` —— `getEventCounts()` 是对外唯一访问器,
+    // 一处直接读 `this.eventCounts` —— `getEventCounts()` 是对外唯一访问器,
     // 绕过它的那一处会在访问器将来加过滤/缓存时与 hook meta 悄悄分叉。
     const finalEventCounts = this.getEventCounts();
 

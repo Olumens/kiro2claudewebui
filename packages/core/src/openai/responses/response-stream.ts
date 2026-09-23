@@ -22,16 +22,17 @@
  * reasoningDelta;summary 通道,兼容面最广)。
  *
  * ★ 推理往返(`reasoningModelId` 非空 = 客户端声明了 `include:["reasoning.encrypted_content"]`):
- *   Claude 的 signature 与 GPT 的 redactedContent 装进信封放在 `encrypted_content`,客户端下一轮
+ *   Claude 的 signature 与 GPT 的不透明推理装进信封放在 `encrypted_content`,客户端下一轮
  *   原样带回,converter 还原成 history 的 `reasoningContent`(信封格式与隔离规则见
- *   reasoning-envelope.ts)。GPT 那一帧在 tool_use **之后**才到,所以它的 reasoning item 只能在
- *   `finalize` 里追加在已发 item 之后。未声明 include 时行为不变:签名丢弃、GPT 不产 item。
+ *   claude/reasoning-envelope.ts)。GPT 那一帧在 tool_use **之后**才到,所以它的 reasoning item
+ *   只能在 `finalize` 里追加在已发 item 之后。未声明 include 时:签名丢弃、GPT 不产 item。
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { encodeReasoningEnvelope } from '../../claude/reasoning-envelope.js';
 import type { SseEvent } from '../../claude/stream.js';
+import type { ReasoningContent } from '../../kiro/model/requests/conversation.js';
 import { NO_FREEFORM_TOOLS, unwrapFreeformArgs } from '../freeform-tool.js';
-import { encodeReasoningEnvelope } from './reasoning-envelope.js';
 import { responsesIncompleteDetails } from './response-nonstream.js';
 import type {
   ResponsesObject,
@@ -482,7 +483,7 @@ export class ResponsesEventEncoder {
     const out: string[] = [];
     // 空输入工具:上游无 input_json_delta → args 停在 ""(非法 JSON,Codex serde_json
     // 解析报错)。补 "{}" 使 arguments 合法,delta+done 两通道一致——与非流式
-    // reduceKiroResponse 的 `if(!buffer) input={}` 归一对齐。
+    // `parseCompletedToolInput` 的空串 → `{}` 归一对齐。
     if (cur.args.length === 0) {
       cur.args = '{}';
       out.push(
@@ -542,22 +543,19 @@ export class ResponsesEventEncoder {
   }
 
   /**
-   * 收口:发 completed/incomplete,保留实际已接收的 output 与 usage。`redactedReasoning` 是
-   * GPT 的加密推理,往返开启时在这里追加成独立 reasoning item(它晚于 tool_use 到达)。
+   * 收口:发 completed/incomplete,保留实际已接收的 output 与 usage。`opaqueReasoning` 是
+   * GPT 的不透明推理,往返开启时在这里追加成独立 reasoning item(它晚于 tool_use 到达)。
    */
-  finalize(usage: ResponsesUsage, redactedReasoning?: string): string[] {
+  finalize(usage: ResponsesUsage, opaqueReasoning?: ReasoningContent): string[] {
     const out = this.closeCurrent();
-    if (this.reasoningModelId && redactedReasoning) {
+    if (this.reasoningModelId && opaqueReasoning) {
       const index = this.outputIndex++;
       const itemId = `rs_${uuidv4().replace(/-/g, '')}`;
       const item: ResponsesReasoningOutputItemOut = {
         id: itemId,
         type: 'reasoning',
         summary: [],
-        encrypted_content: encodeReasoningEnvelope(
-          { redactedContent: redactedReasoning },
-          this.reasoningModelId,
-        ),
+        encrypted_content: encodeReasoningEnvelope(opaqueReasoning, this.reasoningModelId),
       };
       out.push(
         this.line({

@@ -3,7 +3,7 @@
  *
  * 用网关自己的上游层(同一 target)逐项验证上游接不接受、执不执行这些字段:effort 的放法、
  * `thinking.type` / `display`、顶层 `systemPrompt`、history `reasoningContent` 的正常 / 坏签名 /
- * 无签名回传,以及 KAS 用的 `KiroRuntimeService` target。结论见 PITFALLS「原生 reasoning /
+ * 无签名回传。body 取 client profile 的 KAS 形态(同 runtime)。结论见 PITFALLS「原生 reasoning /
  * effort / system 的 wire 真相」。每个场景一次上游调用;`K2C_PROBE_ONLY=a,b` 挑场景,
  * `K2C_PROBE_PROMPT` 换题,`K2C_PROBE_MODEL` 换模型。
  *
@@ -13,10 +13,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import https from 'node:https';
+import { getKiroClientProfile } from '../../src/kiro/client-profile.js';
 import { type Event, eventFromFrame } from '../../src/kiro/model/events/base.js';
 import { parseFrame } from '../../src/kiro/parser/frame.js';
-import { KiroProvider } from '../../src/kiro/provider.js';
 import { ProviderError } from '../../src/kiro/provider-error.js';
 import { createRealUpstream } from './_real-provider.js';
 
@@ -34,32 +33,28 @@ const PUZZLE =
 const NONCE = 'PINEAPPLE-7731';
 const CAPITAL_Q = 'What is the capital of France? One word.';
 
-const { provider, tokenManager } = createRealUpstream();
+const { provider } = createRealUpstream();
 
+const kasBody = getKiroClientProfile().kas.body;
+
+/** KAS 形态的 user 消息:没有工具结果时不带 context(同 `serializeKiroRequest`)。 */
 function userMessage(content: string, modelId: string, extra: Obj = {}): Obj {
-  return {
-    content,
-    modelId,
-    origin: 'KIRO_CLI',
-    userInputMessageContext: {
-      toolResults: [],
-      tools: [],
-      envState: { operatingSystem: 'macos', currentWorkingDirectory: '/tmp/probe' },
-    },
-    ...extra,
-  };
+  return { content, modelId, origin: kasBody.origin, ...extra };
 }
 
 function body(current: Obj, history: Obj[] = [], top: Obj = {}): string {
+  const conversationId = `sess_${randomUUID()}`;
   return JSON.stringify({
     conversationState: {
-      conversationId: randomUUID(),
+      conversationId,
+      rootConversationId: conversationId,
       agentContinuationId: randomUUID(),
-      agentTaskType: 'vibe',
-      chatTriggerType: 'MANUAL',
+      agentTaskType: kasBody.agentTaskType,
+      chatTriggerType: kasBody.chatTriggerType,
       currentMessage: { userInputMessage: current },
-      history,
+      ...(history.length > 0 ? { history } : {}),
     },
+    agentMode: kasBody.agentMode,
     ...top,
   });
 }
@@ -133,10 +128,8 @@ function drainFrames(raw: Buffer, s: Summary): void {
   }
 }
 
-type Transport = (requestBody: string) => Promise<Summary>;
-
-/** 走网关自己的 provider(codewhispererstreaming target、重试头、profileArn 注入全同 runtime)。 */
-const viaProvider: Transport = async (requestBody) => {
+/** 走网关自己的 provider(KAS target、重试头、profileArn 注入全同 runtime)。 */
+async function viaProvider(requestBody: string): Promise<Summary> {
   const t0 = Date.now();
   const s = emptySummary();
   try {
@@ -155,52 +148,7 @@ const viaProvider: Transport = async (requestBody) => {
   }
   s.ms = Date.now() - t0;
   return s;
-};
-
-/**
- * 直接以 KAS 用的 `KiroRuntimeService.GenerateAssistantResponse` target 发同一 body
- * (网关 provider 把 target 钉死在 codewhispererstreaming),看新命名空间接不接受
- * `systemPrompt` 等字段。只用于探针,不进 runtime。
- */
-const viaKiroRuntime: Transport = async (requestBody) => {
-  const ctx = await tokenManager.acquireContext();
-  const payload = KiroProvider.injectProfileArn(requestBody, ctx.credentials.profileArn);
-  const t0 = Date.now();
-  const s = emptySummary();
-  const raw = await new Promise<{ status: number; buf: Buffer }>((resolve, reject) => {
-    const req = https.request(
-      {
-        host: 'runtime.us-east-1.kiro.dev',
-        path: '/',
-        method: 'POST',
-        headers: {
-          'content-type': 'application/x-amz-json-1.0',
-          'x-amz-target': 'KiroRuntimeService.GenerateAssistantResponse',
-          'x-amzn-codewhisperer-optout': 'true',
-          'x-amzn-kiro-client-attribution': 'unrecognized',
-          'x-amz-user-agent':
-            'aws-sdk-js/1.0.0 KiroCLI/2.22.1 KAS/unknown os/macos md/appVersion-2.22.1 app/AmazonQ-For-CLI',
-          'user-agent':
-            'aws-sdk-js/1.0.0 ua/2.1 os/darwin#25.6.0 lang/js md/nodejs#22.22.2 api/kiroruntime#1.0.0 m/N KiroCLI/2.22.1 KAS/unknown os/macos md/appVersion-2.22.1 app/AmazonQ-For-CLI',
-          authorization: `Bearer ${ctx.token}`,
-          'content-length': String(Buffer.byteLength(payload)),
-        },
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, buf: Buffer.concat(chunks) }));
-      },
-    );
-    req.on('error', reject);
-    req.end(payload);
-  });
-  s.status = raw.status;
-  if (raw.status === 200) drainFrames(raw.buf, s);
-  else s.errorBody = raw.buf.toString('utf8').slice(0, 600);
-  s.ms = Date.now() - t0;
-  return s;
-};
+}
 
 function show(name: string, s: Summary): void {
   const { reasoningText, redactedText, ...rest } = s;
@@ -218,13 +166,9 @@ function want(name: string): boolean {
 
 async function main(): Promise<void> {
   const results: Record<string, Summary> = {};
-  const run = async (
-    name: string,
-    rb: string,
-    transport: Transport = viaProvider,
-  ): Promise<Summary | undefined> => {
+  const run = async (name: string, rb: string): Promise<Summary | undefined> => {
     if (!want(name)) return undefined;
-    const s = await transport(rb);
+    const s = await viaProvider(rb);
     results[name] = s;
     show(name, s);
     return s;
@@ -263,22 +207,12 @@ async function main(): Promise<void> {
     ),
   );
 
-  // ── 顶层 systemPrompt 上游认不认(两个 target) ─────────────────────
+  // ── 顶层 systemPrompt 上游认不认 ─────────────────────────────────
   await run('system-prompt-top-level', body(userMessage(CAPITAL_Q, MODEL), [], systemTop));
-  await run(
-    'kiroruntime-plain',
-    body(userMessage(PUZZLE, MODEL), [], { agentMode: 'vibe', ...claudeTop('max') }),
-    viaKiroRuntime,
-  );
-  await run(
-    'system-prompt-kiroruntime',
-    body(userMessage(CAPITAL_Q, MODEL), [], { agentMode: 'vibe', ...systemTop }),
-    viaKiroRuntime,
-  );
 
   // ── history reasoningContent 回传 ──────────────────────────────
   if (amrfMax?.signature && amrfMax.reasoningText) {
-    const seed = amrfMax;
+    const seed = { ...amrfMax, signature: amrfMax.signature };
     const hist = (sig: string | undefined) => [
       { userInputMessage: userMessage(PUZZLE, MODEL) },
       {

@@ -3,14 +3,14 @@
  *
  * output items:reasoning(有明文思维链时走 summary 通道;推理往返开启时带 `encrypted_content`,
  * GPT 的摘要为空)+ message(有文本时)+ 每个 tool_use 一个 function_call item。usage 用原始 token(不经 buildClaudeUsagePayload);plugin 的
- * `addExtension` 扩展经 `extensions` 参内嵌进 usage(只搬扩展、不套 override,守 #16)。
+ * `addExtension` 扩展经 `extensions` 参内嵌进 usage(只搬扩展、不套 override,守踩坑「OpenAI prompt_tokens」)。
  */
 
 import { v4 as uuidv4 } from 'uuid';
 import { type ReducedAttempt, reducedReasoning } from '../../claude/non-stream-reduce.js';
+import { encodeReasoningEnvelope } from '../../claude/reasoning-envelope.js';
 import { mergeUsageExtensions, type PluginUsageExtensions } from '../../claude/stream.js';
 import { NO_FREEFORM_TOOLS, unwrapFreeformInput } from '../freeform-tool.js';
-import { encodeReasoningEnvelope } from './reasoning-envelope.js';
 import type { ResponsesObject, ResponsesOutputItem, ResponsesUsage } from './types.js';
 import { NO_TOOL_NAMESPACES } from './types.js';
 
@@ -48,7 +48,7 @@ export function buildResponsesObject(args: {
   customToolNames?: ReadonlySet<string>;
   /** 工具名 → namespace(请求侧收集);流式侧同一分派见 response-stream.ts。 */
   toolNamespaces?: ReadonlyMap<string, string>;
-  /** 非空 = 推理往返开启:Claude 签名 / GPT 密文装进 `encrypted_content`(见 reasoning-envelope.ts)。 */
+  /** 非空 = 推理往返开启:Claude 签名 / GPT 密文装进 `encrypted_content`(见 claude/reasoning-envelope.ts)。 */
   reasoningModelId?: string;
 }): ResponsesObject {
   const {
@@ -67,8 +67,7 @@ export function buildResponsesObject(args: {
   const incompleteDetails = responsesIncompleteDetails(reduced.stopReason);
 
   // reasoning 先于 message/function_call(协议顺序)。Claude 明文思维链经 summary 通道
-  // surface;GPT 加密 reasoning 使 reasoningText 保持空 → 往返未开时不产 item(与流式对齐)。
-  // 信封里的明文只取原生 `reasoningText`:签名只覆盖它,legacy `<thinking>` 没有签名。
+  // surface;信封里的明文只取原生 `reasoningText`:签名只覆盖它,legacy `<thinking>` 没有签名。
   const reasoning = reducedReasoning(reduced);
   const envelope =
     reasoningModelId && reduced.reasoningSignature
@@ -78,9 +77,7 @@ export function buildResponsesObject(args: {
           },
           reasoningModelId,
         )
-      : reasoningModelId && reduced.redactedReasoning
-        ? encodeReasoningEnvelope({ redactedContent: reduced.redactedReasoning }, reasoningModelId)
-        : undefined;
+      : undefined;
   if (reasoning || envelope) {
     output.push({
       id: `rs_${uuidv4().replace(/-/g, '')}`,
@@ -123,6 +120,17 @@ export function buildResponsesObject(args: {
             arguments: JSON.stringify(tu.input ?? {}),
           },
     );
+  }
+
+  // GPT 的不透明推理晚于 tool_use 到达,流式只能在 finalize 追加成独立 item;非流式同序。
+  // 往返未开(没声明 include)时不产 item。
+  if (reasoningModelId && reduced.opaqueReasoning) {
+    output.push({
+      id: `rs_${uuidv4().replace(/-/g, '')}`,
+      type: 'reasoning',
+      summary: [],
+      encrypted_content: encodeReasoningEnvelope(reduced.opaqueReasoning, reasoningModelId),
+    });
   }
 
   return {

@@ -45,11 +45,6 @@ export interface Thinking {
   display?: 'summarized' | 'omitted';
 }
 
-/** Check if thinking is on (`enabled` was already normalized to `adaptive` at the edge). */
-export function isThinkingEnabled(thinking: Thinking | undefined): boolean {
-  return thinking?.type === 'adaptive';
-}
-
 /** OutputConfig configuration */
 export interface OutputConfig {
   effort: string;

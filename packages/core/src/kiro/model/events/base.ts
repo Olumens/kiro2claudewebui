@@ -130,9 +130,9 @@ function parseEvent(frame: Frame): Event {
       // kiro-cli 2.6.0+ 原生 reasoning event。payload schema 实测两种形态：
       //   - Claude 4.7/4.8: { "text": "fragment", "signature"?: "<base64 签名>" }
       //     与 Anthropic Extended Thinking 的 thinking_delta / signature_delta 1:1 对应。
-      //   - GPT-5.6: { "redactedContent": "<base64 加密 blob>" }（无 text/signature）——
-      //     隐藏思维链,内容加密不可读。显式建模 redactedContent 而非落进 text ?? ''
-      //     的空串黑洞,让它可观测；下游 stream.ts 的守卫据「无 text 无 signature」丢弃。
+      //   - GPT-5.6(V3 target):{ "text": "...", "signature": "<密文>" }——文本只是占位,推理在
+      //     签名的密文里;V2 target 回 { "redactedContent": "<base64 加密 blob>" },同样解析。
+      //     两种都不作为 thinking 展示,由 stream/opaque-reasoning.ts 原样保留供回传。
       const payload = eventPayload(frame);
       return {
         kind: 'ReasoningContent',

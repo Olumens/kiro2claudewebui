@@ -1,4 +1,4 @@
-import type { ConversationState, EffortLevel } from './conversation.js';
+import type { ConversationState, EffortLevel, UserMessage } from './conversation.js';
 
 /**
  * 请求顶层的模型附加参数,effort 唯一生效的位置(kiro-cli KAS 也发在这里)。形状逐模型由上游
@@ -17,6 +17,8 @@ export interface AdditionalModelRequestFields {
 export interface KiroRequest {
   conversationState: ConversationState;
   profileArn?: string;
+  /** KAS 顶层字段:主会话 `vibe`,subagent 会话为子 agent 的模式 */
+  agentMode?: string;
   additionalModelRequestFields?: AdditionalModelRequestFields;
 }
 
@@ -68,17 +70,47 @@ export function stripReasoningContent(serialized: string): string | undefined {
  * 另一个 wire 细节：Kiro 后端对空 `history` 数组的处理不稳定 —— 有时会拒绝
  * 带 `"history": []` 同时又带 `currentMessage` 的请求。所以空数组要从 wire
  * 输出里完全去掉，而不是保留一个空的 `"history": []`。
+ *
+ * 其余空集合同 KAS 一样不上 wire:空 `images` / `toolResults` 省略;`userInputMessageContext`
+ * 里全是空集合时整个省略(KAS 没有工具结果的历史消息就不带 context)。
+ *
+ * ★ 以上规则只作用于 wire 结构节点(conversationState / 各条消息 / userInputMessage / context)。
+ * 工具参数(`toolUses[].input`)、工具结果、工具 schema 是不透明载荷,里面的 `kind` / `images: []`
+ * 是模型或工具的原话,改了就篡改了历史。
  */
 export function serializeKiroRequest(req: KiroRequest): string {
-  return JSON.stringify(req, (key, value) => {
+  const structural = collectStructuralNodes(req.conversationState);
+  return JSON.stringify(req, function (this: unknown, key: string, value: unknown) {
+    if (!structural.has(this as object)) return value;
     // 剥离 Message union 上的 discriminator tag
-    if (key === 'kind' && (value === 'user' || value === 'assistant')) {
+    if (key === 'kind') return undefined;
+    if (
+      (key === 'history' || key === 'images' || key === 'toolResults') &&
+      Array.isArray(value) &&
+      value.length === 0
+    ) {
       return undefined;
     }
-    // 空 history 数组完全从 wire 输出中省略
-    if (key === 'history' && Array.isArray(value) && value.length === 0) {
-      return undefined;
-    }
+    if (key === 'userInputMessageContext' && isAllEmpty(value)) return undefined;
     return value;
   });
+}
+
+function collectStructuralNodes(state: ConversationState): WeakSet<object> {
+  const nodes = new WeakSet<object>([state]);
+  const addUser = (m: UserMessage) => {
+    nodes.add(m);
+    if (m.userInputMessageContext) nodes.add(m.userInputMessageContext);
+  };
+  addUser(state.currentMessage.userInputMessage);
+  for (const entry of state.history) {
+    nodes.add(entry);
+    if (entry.kind === 'user') addUser(entry.userInputMessage);
+  }
+  return nodes;
+}
+
+function isAllEmpty(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  return Object.values(value).every((v) => v === undefined || (Array.isArray(v) && v.length === 0));
 }

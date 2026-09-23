@@ -43,12 +43,13 @@
  *
  * ## What's different across the three call paths
  *
- * Five hook-shaped fields on `RetryableRequest`:
+ * Hook-shaped fields on `RetryableRequest`:
  *
  * - `label`         — free-form string for log correlation
- * - `buildUrl`      — per-credential URL (different endpoints)
- * - `buildHeaders`  — per-profile headers (MCP adds x-amzn-kiro-profile-arn)
- * - `transformBody` — request body shaping (main API injects profileArn)
+ * - `buildUrl`      — per-credential URL (region-dependent host; every KAS call POSTs to `/`)
+ * - `buildHeaders`  — per-operation headers (GAR / MCP differ in static set and target)
+ * - `kiroAttemptHeader` — whether `x-kiro-attempt` is sent (KAS omits it on InvokeMCP)
+ * - `transformBody` — request body shaping (both inject profileArn into the body)
  * - `axiosConfig`   — response type (json / arraybuffer / stream) and extras
  * - `readErrorBody` — how to drain the response body into a string for
  *                     classification (streams need chunk concatenation,
@@ -87,8 +88,17 @@ export interface RetryableRequest {
   body: string;
   /** Build the full URL for this request given the current credentials. */
   buildUrl(credentials: KiroCredentials): string;
-  /** Build the request headers given credentials, bearer token, and host. */
-  buildHeaders(credentials: KiroCredentials, token: string, host: string): Record<string, string>;
+  /**
+   * Build the request headers given credentials, bearer token, and host. A `false` value
+   * suppresses a header axios would otherwise add by default (`accept` / `accept-encoding`).
+   */
+  buildHeaders(
+    credentials: KiroCredentials,
+    token: string,
+    host: string,
+  ): Record<string, string | false>;
+  /** `x-kiro-attempt` on every attempt (default true). KAS omits it on InvokeMCP. */
+  kiroAttemptHeader?: boolean;
   /** Transform the body just before sending (e.g. inject profileArn). */
   transformBody(body: string, credentials: KiroCredentials): string;
   /** Extra axios config merged onto the base config (timeout, responseType, etc.). */
@@ -119,7 +129,7 @@ export interface RetryHeaderOptions {
   maxAttempts?: number;
   /**
    * 是否发 `x-kiro-attempt`。默认发。⚠ 置 false 不是风格选择:那是 Kiro 自定义头,
-   * 只在**抓到过**的端点上发——没有抓包证据就加,等于凭空改变伪装画像。
+   * 只在**抓到过**的端点上发——没有抓包证据就加,等于凭空改变客户端画像。
    */
   kiroAttemptHeader?: boolean;
 }
@@ -127,10 +137,10 @@ export interface RetryHeaderOptions {
 /**
  * 注入 kiro-cli 的重试头。**格式的唯一 owner**:`attempt=N; max=M` 的拼法、第 2 次
  * 起才出现的 `ttl=`、以及 `x-kiro-attempt` 的分隔符差异(`;` 无空格)全在这里,别在
- * 调用点手写字面量——那正是这个函数出现之前的形态,同一份 wire 语法散在三处。
+ * 调用点手写字面量:同一份 wire 语法散在多处,改一处就漂移。
  *
- * ⚠ 更别搬回 `provider.ts` 的 `buildHeaders`:那里每次调用生成新 uuid,上游看到的
- * 每次重试都成了「attempt=1 的全新请求」。invocation-id 的生命周期属于**调用方**
+ * ⚠ 也别放进 `provider.ts` 的 `buildHeaders`:它每个 attempt 调一次,在那里生成 uuid 会让
+ * 上游看到的每次重试都成了「attempt=1 的全新请求」。invocation-id 的生命周期属于**调用方**
  * (一次 `execute()` = 一次逻辑调用),所以它是参数而不是本函数生成的。
  *
  * 2.21.1 实测形态(`scripts/capture-kiro-cli.sh` 抓包):
@@ -142,7 +152,7 @@ export interface RetryHeaderOptions {
  * ```
  */
 export function applyRetryHeaders(
-  headers: Record<string, string>,
+  headers: Record<string, string | false>,
   invocationId: string,
   attempt: number,
   opts: RetryHeaderOptions = {},
@@ -171,12 +181,11 @@ export class RetryExecutor {
    * or throws — either a `ProviderError` (HTTP-level classification) or
    * whatever the token manager threw (credentials-level failure).
    *
-   * Single attempt by default. If upstream returns 401 with a body that
-   * matches `isBearerTokenInvalidBody`, the executor calls
-   * `tokenManager.forceRefreshToken()` and tries exactly once more. No
-   * other retry logic exists — transient upstream failures (408/429/5xx)
-   * are forwarded verbatim so the downstream client can apply its own
-   * HTTP-standard backoff.
+   * Single attempt by default. The only retries are the two in the header
+   * comment: 401 bearer-invalid → `tokenManager.forceRefreshToken()` and one
+   * more try; 400 `THINKING_SIGNATURE_INVALID` → strip reasoningContent and
+   * one more try. Transient upstream failures (408/429/5xx) are forwarded
+   * verbatim so the downstream client can apply its own HTTP-standard backoff.
    */
   async execute(req: RetryableRequest): Promise<AxiosResponse> {
     const log = getLogger();
@@ -192,7 +201,9 @@ export class RetryExecutor {
       const url = req.buildUrl(ctx.credentials);
       const host = req.buildHost(ctx.credentials);
       const headers = req.buildHeaders(ctx.credentials, ctx.token, host);
-      applyRetryHeaders(headers, invocationId, ++attempt);
+      applyRetryHeaders(headers, invocationId, ++attempt, {
+        kiroAttemptHeader: req.kiroAttemptHeader,
+      });
       const body = req.transformBody(req.body, ctx.credentials);
 
       log.debug({ msg: 'calling Kiro API', url, type: req.label });
@@ -260,7 +271,7 @@ export class RetryExecutor {
         throw new ProviderError({ kind: 'bad_request', status: 400 }, responseBody);
       }
 
-      // 401/403 — the gateway's one essential retry: force-refresh the bearer
+      // 401/403 — retry 1 (header comment): force-refresh the bearer
       // token if upstream signals it was invalidated. Downstream cannot do
       // this itself (no access to refresh token), so the gateway must.
       if (status === 401 || status === 403) {
@@ -297,7 +308,7 @@ export class RetryExecutor {
           status,
           // Logged but NOT used to re-classify: 429 is already the more specific
           // downstream signal. Present so that querying `capacity_reason` (踩坑
-          // #23) covers *every* shape of a capacity event — 429 is the most
+          // 「跨模型对照」) covers *every* shape of a capacity event — 429 is the most
           // common one, and omitting it here would silently undercount.
           capacity_reason: matchModelCapacityReason(responseBody),
           retry_after_seconds: retryAfterSeconds,

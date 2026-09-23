@@ -128,4 +128,50 @@ describe('KiroRequest', () => {
     expect(parsed.conversationState.history).toBeDefined();
     expect(parsed.conversationState.history).toHaveLength(1);
   });
+
+  it('只在 wire 结构节点上剥 kind / 空集合,工具参数与工具结果原样保留', () => {
+    const state = createConversationState('conv-opaque');
+    const current = createUserInputMessage('next', 'claude-opus-4.7');
+    current.userInputMessageContext.toolResults = [
+      {
+        toolUseId: 't1',
+        status: 'success',
+        content: [{ json: { kind: 'user', images: [], toolResults: [] } }],
+      },
+    ];
+    state.currentMessage = { userInputMessage: current };
+    state.history = [
+      { kind: 'user', userInputMessage: createUserMessage('go', 'claude-opus-4.7') },
+      {
+        kind: 'assistant',
+        assistantResponseMessage: {
+          ...createAssistantMessage(''),
+          toolUses: [
+            {
+              toolUseId: 't1',
+              name: 'Post',
+              input: { kind: 'assistant', images: [], history: [], userInputMessageContext: {} },
+            },
+          ],
+        },
+      },
+    ];
+
+    const parsed = JSON.parse(serializeKiroRequest({ conversationState: state }));
+
+    // 结构节点照常剥
+    expect(parsed.conversationState.history[0]).not.toHaveProperty('kind');
+    expect(parsed.conversationState.history[0].userInputMessage).not.toHaveProperty('images');
+    // 不透明载荷一字不改
+    expect(parsed.conversationState.history[1].assistantResponseMessage.toolUses[0].input).toEqual({
+      kind: 'assistant',
+      images: [],
+      history: [],
+      userInputMessageContext: {},
+    });
+    expect(
+      parsed.conversationState.currentMessage.userInputMessage.userInputMessageContext
+        .toolResults[0].content[0].json,
+    ).toEqual({ kind: 'user', images: [], toolResults: [] });
+  });
 });

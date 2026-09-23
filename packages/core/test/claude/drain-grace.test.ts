@@ -184,7 +184,7 @@ describe('post-disconnect drain grace: self-destroy is not an upstream error', (
  * 实际拿到 usage 的条数,精确等于 `drain grace expired` 的 warn 数 —— c1 差 0/
  * grace 0、c2 差 2/grace 2、c3 差 6/grace 6,三台全中。
  *
- * 这里钉的是:那笔漏账必须被**显式标记**(而不是伪装成一个普通的「本来就没有
+ * 这里钉的是:那笔漏账必须被**显式标记**(而不是混同成一个普通的「本来就没有
  * credit」),让插件与运维都能把它和真·空流区分开。
  */
 describe('post-disconnect drain grace: the dropped Metering frame is accounted for', () => {

@@ -20,6 +20,7 @@ import { estimateOutputTokens } from '../token.js';
 import type { MessageHandlerResult } from './empty-capture.js';
 import { mapProviderError } from './error-mapper.js';
 import { reduceKiroResponse } from './non-stream-reduce.js';
+import { redactedThinkingBlock } from './stream/opaque-reasoning.js';
 import {
   buildClaudeUsagePayload,
   buildKiroUsageFinishEvent,
@@ -36,7 +37,7 @@ import { createErrorResponse } from './types.js';
  *
  * `emptyStreamRetries`: 上游返回「200 + 零内容帧」空响应时,对同一请求最多重发
  * 这么多次来吸收瞬时空流(见 `Config.emptyStreamRetries`)。耗尽仍空 → 503
- * `overloaded_error`(现状)。返回值标记最终是否为空,供上层诊断抓包。
+ * `overloaded_error`。返回值标记最终是否为空,供上层诊断抓包。
  *
  * `rescueRegistry`: 泄漏工具调用文本救援的工具注册表(tool-call-text.ts),
  * undefined = 关闭。见 `Config.toolCallTextRescue`。
@@ -119,6 +120,7 @@ export async function handleNonStreamRequest(
       kiroMetering,
       reasoningText,
       reasoningSignature,
+      opaqueReasoning,
       thinkingText,
       upstreamError,
       silentFailure,
@@ -130,7 +132,7 @@ export async function handleNonStreamRequest(
     // 物化一次:判空/错误/成功三条路径都要读它,取同一份快照才保证同一条日志里
     // metering_lost 与 event_counts 互相自洽,读的人也不必回头论证中途没人改过这个
     // Map。与 stream-handler.ts 的 finalEventCounts、openai/non-stream-transport.ts
-    // 的 eventCounts 同手法——这里是四条 transport 里最后一个拉齐的。
+    // 的 eventCounts 同手法。
     const finalEventCounts = Object.fromEntries(eventCounts);
 
     // Mid-stream upstream Error/Exception frame → surface as a real error instead
@@ -159,9 +161,9 @@ export async function handleNonStreamRequest(
         continue;
       }
       // Bill any credit already consumed before the error (a Metering frame may
-      // have preceded it): the old code reached the usage-finish hook on this
-      // input, so the early error return must not silently drop that credit from
-      // the local quota tracker. Only when a Metering frame was actually captured.
+      // have preceded it): the early error return must not silently drop that
+      // credit from the local quota tracker. Only when a Metering frame was
+      // actually captured.
       if (kiroMetering) {
         const finalInputTokens = contextInputTokens ?? inputTokens;
         const hookEvent = buildKiroUsageFinishEvent({
@@ -222,7 +224,7 @@ export async function handleNonStreamRequest(
         });
       }
       // 重试耗尽仍空 → 503 overloaded_error。多次尝试全空 = 确定性空流,
-      // 失败绑定在请求内容上,文案改为提示压缩/裁剪会话(与流式路径一致)。
+      // 失败绑定在请求内容上,文案提示压缩/裁剪会话(与流式路径一致)。
       log.warn({
         msg: 'upstream returned empty non-stream response',
         empty_attempts: emptyAttempts,
@@ -259,12 +261,17 @@ export async function handleNonStreamRequest(
       }
     }
 
-    // thinking 块（两条路径二选一）之后统一追加 text，再追加 toolUses——顺序不变。
+    // thinking 块（两条路径二选一）之后统一追加 text，再追加 toolUses。
     if (textContent) {
       content.push({ type: 'text', text: textContent });
     }
 
     content.push(...toolUses);
+
+    // GPT 的不透明推理 → `redacted_thinking`,排在最后:流式里它晚于 tool_use 到达、只能追加在
+    // 已发的块之后,非流式同序(见 `redactedThinkingBlock`)。
+    const opaqueBlock = opaqueReasoning ? redactedThinkingBlock(opaqueReasoning, model) : undefined;
+    if (opaqueBlock) content.push(opaqueBlock);
 
     // Estimate output tokens
     const outputTokens = estimateOutputTokens(content);

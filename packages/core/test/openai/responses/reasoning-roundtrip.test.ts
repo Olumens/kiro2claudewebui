@@ -9,11 +9,11 @@
 import type { AxiosResponse } from 'axios';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { KiroProvider } from '../../../src/kiro/provider.js';
 import {
   decodeReasoningEnvelope,
   encodeReasoningEnvelope,
-} from '../../../src/openai/responses/reasoning-envelope.js';
+} from '../../../src/claude/reasoning-envelope.js';
+import type { KiroProvider } from '../../../src/kiro/provider.js';
 import { HookBus } from '../../../src/plugin-host/index.js';
 import { registerOpenAiRoutes } from '../../../src/routes/openai.js';
 import { requestContextStorage } from '../../../src/shared/request-context.js';
@@ -24,6 +24,7 @@ import {
   buildReasoningContentFrame,
   buildRedactedReasoningFrame,
   buildToolUseFrame,
+  withoutReasoningEnvelopes,
 } from '../../helpers/event-stream.js';
 
 const API_KEY = 'test-key';
@@ -153,11 +154,19 @@ describe('reasoning envelope', () => {
   });
 
   it('rejects foreign ciphertext and malformed or unsigned envelopes', () => {
-    const forge = (v: unknown) =>
-      `k2c.r1.${Buffer.from(JSON.stringify(v), 'utf8').toString('base64url')}`;
-    expect(decodeReasoningEnvelope('gAAAAABopenai-ciphertext', GPT).ok).toBe(false);
+    const forge = (v: unknown) => `k2c.r2.${JSON.stringify(v)}`;
+    expect(decodeReasoningEnvelope('gAAAAABopenai-ciphertext', GPT)).toEqual({
+      ok: false,
+      reason: 'foreign',
+    });
     expect(decodeReasoningEnvelope(undefined, GPT).ok).toBe(false);
-    expect(decodeReasoningEnvelope('k2c.r1.@@@', GPT)).toEqual({ ok: false, reason: 'malformed' });
+    expect(decodeReasoningEnvelope(null, GPT).ok).toBe(false);
+    expect(decodeReasoningEnvelope('k2c.r2.@@@', GPT)).toEqual({ ok: false, reason: 'malformed' });
+    // 网关签发、但版本不认得的信封:丢弃,不能当外来 redacted 数据原样上送
+    expect(decodeReasoningEnvelope('k2c.r1.eyJtIjoiZ3B0In0', GPT)).toEqual({
+      ok: false,
+      reason: 'malformed',
+    });
     expect(decodeReasoningEnvelope(forge({ m: GPT, r: {} }), GPT).ok).toBe(false);
     expect(
       decodeReasoningEnvelope(forge({ m: GPT, r: { reasoningText: { text: 'x' } } }), GPT).ok,
@@ -186,7 +195,35 @@ describe('Responses reasoning round-trip', () => {
       ok: true,
       reasoning: { redactedContent: BLOB },
     });
-    expect(res.payload).not.toContain(BLOB);
+    // 密文只随信封下发
+    expect(withoutReasoningEnvelopes(res.payload)).not.toContain(BLOB);
+  });
+
+  it('envelopes the V3 GPT frame ({text:"...", signature}) as reasoningText without surfacing "..."', async () => {
+    const rec: Recorder = { bodies: [] };
+    app = await buildApp(
+      [
+        buildToolUseFrame('run', 'call_1', '{"cmd":"ls"}', true),
+        buildReasoningContentFrame('...', 'sig-gpt'),
+        buildMeteringFrame(METERING),
+        buildMetadataFrame(),
+      ],
+      rec,
+    );
+    const res = await post(app, 'responses', {
+      model: GPT,
+      stream: true,
+      include: ['reasoning.encrypted_content'],
+      input: 'list files',
+    });
+    const items = sseItems(res.payload);
+    expect(items.map((i) => i.type)).toEqual(['function_call', 'reasoning']);
+    expect(items[1].summary).toEqual([]);
+    expect(decodeReasoningEnvelope(items[1].encrypted_content, GPT)).toEqual({
+      ok: true,
+      reasoning: { reasoningText: { text: '...', signature: 'sig-gpt' } },
+    });
+    expect(res.payload).not.toContain('reasoning_summary_text');
   });
 
   it('keeps the old wire when include is absent', async () => {
@@ -289,7 +326,7 @@ describe('Responses reasoning round-trip', () => {
     });
   });
 
-  it('puts the enveloped GPT reasoning first in non-stream output', async () => {
+  it('puts the enveloped GPT reasoning last in non-stream output, like the stream', async () => {
     const rec: Recorder = { bodies: [] };
     app = await buildApp(gptToolFrames, rec);
     const res = await post(app, 'responses', {
@@ -298,8 +335,8 @@ describe('Responses reasoning round-trip', () => {
       input: 'list files',
     });
     const output = res.json().output as Array<Record<string, unknown>>;
-    expect(output.map((i) => i.type)).toEqual(['reasoning', 'function_call']);
-    expect(decodeReasoningEnvelope(output[0].encrypted_content, GPT).ok).toBe(true);
+    expect(output.map((i) => i.type)).toEqual(['function_call', 'reasoning']);
+    expect(decodeReasoningEnvelope(output[1].encrypted_content, GPT).ok).toBe(true);
   });
 });
 
@@ -315,7 +352,9 @@ describe('session key → conversationId', () => {
     expect(ids[2]).not.toBe(ids[0]);
     expect(ids[3]).not.toBe(ids[4]);
     expect(new Set([ids[0], ids[2], ids[3], ids[4]]).size).toBe(4);
-    expect(ids[0]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(ids[0]).toMatch(
+      /^sess_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
     expect(ids[0]).not.toContain('thread-a');
   });
 
@@ -332,9 +371,9 @@ describe('session key → conversationId', () => {
     expect(ids[2]).not.toBe(ids[3]);
   });
 
-  it('maps Codex subagent threads to kiro-cli subagent sessions', async () => {
-    // kiro-cli V2 的 subagent:自己的 conversationId、不带 agentContinuationId(2.23.1 抓包)。
-    // Codex 父子共用 prompt_cache_key,只有 thread-id 不同。
+  it('maps Codex subagent threads to KAS subagent sessions', async () => {
+    // KAS 的 subagent:自己的 conversationId 与 acid、rootConversationId 指向父会话、顶层 agentMode
+    // 换成子 agent 的(2.23.1 抓包)。Codex 父子共用 prompt_cache_key,只有 thread-id 不同。
     const rec: Recorder = { bodies: [] };
     app = await buildApp(gptToolFrames, rec);
     const body = { model: GPT, input: 'hi', prompt_cache_key: 'root-session' };
@@ -348,12 +387,14 @@ describe('session key → conversationId', () => {
     expect(ids[1]).toBe(ids[0]);
     expect(ids[3]).toBe(ids[2]);
     expect(new Set([ids[0], ids[2], ids[4]]).size).toBe(3);
-    const acid = (i: number) =>
-      (rec.bodies[i].conversationState as Record<string, unknown>).agentContinuationId;
-    expect(acid(0)).toBeTypeOf('string');
-    expect(acid(1)).toBe(acid(0));
-    expect('agentContinuationId' in (rec.bodies[2].conversationState as object)).toBe(false);
-    expect(JSON.stringify(rec.bodies[4])).not.toContain('agentContinuationId');
+    const cs = (i: number) => rec.bodies[i].conversationState as Record<string, unknown>;
+    expect(cs(0).rootConversationId).toBe(ids[0]);
+    expect(cs(2).rootConversationId).toBe(ids[0]);
+    expect(cs(4).rootConversationId).toBe(ids[0]);
+    expect(rec.bodies[0].agentMode).toBe('vibe');
+    expect(rec.bodies[2].agentMode).toBe('general-task-execution');
+    expect(cs(2).agentContinuationId).toBeTypeOf('string');
+    expect(cs(2).agentContinuationId).not.toBe(cs(0).agentContinuationId);
   });
 
   it('does not treat a thread-id without prompt_cache_key as a session', async () => {

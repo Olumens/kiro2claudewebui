@@ -47,8 +47,9 @@ const LEGEND = /^\[Attached images, in order: [^\n]*\]\n?/;
 function summarize(user: UserWire) {
   return {
     content: user.content.replace(LEGEND, ''),
-    images: user.images.map((i) => i.source.bytes),
-    results: user.userInputMessageContext.toolResults.map((r) => r.toolUseId),
+    // 空集合在 wire 上被省略(同 KAS)
+    images: (user.images ?? []).map((i) => i.source.bytes),
+    results: (user.userInputMessageContext?.toolResults ?? []).map((r) => r.toolUseId),
   };
 }
 
@@ -126,9 +127,9 @@ describe('tool_result order follows tool_use order', () => {
       { role: 'user', content: [toolResult('toolu_alpha', [image(PNG_A)])] },
     ]);
 
-    // 末尾两条 user 与历史里的连串规则相同:整体是一轮、整体是 currentMessage。旧实现把前
-    // 一条塞进 history 再补一条假 assistant "OK",同一段对话在下一轮又会合并成一条——
-    // 形态随轮次漂移。现在 history 只剩客户端真实的两条,两个结果按 tool_use 顺序排。
+    // 末尾两条 user 与历史里的连串规则相同:整体是一轮、整体是 currentMessage,不拆进 history、
+    // 不补假 assistant(否则同一段对话下一轮合并后形态漂移)。history 只剩客户端真实的两条,
+    // 两个结果按 tool_use 顺序排。
     expect(state.history).toHaveLength(2);
     expect(summarize(state.currentMessage.userInputMessage)).toEqual({
       content: '',

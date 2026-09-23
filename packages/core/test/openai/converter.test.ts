@@ -191,6 +191,12 @@ describe('convertOpenAiRequest: reasoning_effort → thinking/output_config', ()
     }
   });
 
+  it('none → thinking disabled(不能落回模型默认档位)', () => {
+    const r = convertOpenAiRequest(base({ reasoning_effort: 'none' }));
+    expect(r.thinking).toEqual({ type: 'disabled' });
+    expect(r.output_config).toBeUndefined();
+  });
+
   it('缺省不注入 thinking/output_config', () => {
     const r = convertOpenAiRequest(base({}));
     expect(r.thinking).toBeUndefined();

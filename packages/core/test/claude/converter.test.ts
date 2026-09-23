@@ -7,11 +7,14 @@ import {
   IDENTITY_OVERRIDE_DIRECTIVE,
   INTERRUPTED_TOOL_RESULT_TEXT,
   mapModel,
+  toKiroRequest,
   UNSUPPORTED_DOCUMENT_PLACEHOLDER,
   usesNativeReasoning,
 } from '../../src/claude/converter.js';
 import type { Tool as ClaudeTool, MessagesRequest, Metadata } from '../../src/claude/types.js';
 import { preprocessSystem } from '../../src/claude/types.js';
+import { deriveConversationId } from '../../src/kiro/model/requests/conversation.js';
+import { serializeKiroRequest } from '../../src/kiro/model/requests/kiro.js';
 import { logger } from '../../src/shared/logger.js';
 import { generateLargeBuffer, generateMinimalPdfBytes } from '../helpers/fixtures.js';
 
@@ -193,52 +196,73 @@ describe('convertRequest - chat trigger type', () => {
   });
 });
 
-describe('convertRequest - kiro-cli body shape', () => {
-  // converter 统一按 kiro-cli 2.0+ 抓包形态输出 body：
-  //   origin=KIRO_CLI + envState（operatingSystem + currentWorkingDirectory）
-  //   current message 和所有 history user message 都带这两个字段。
-  // 这是和 provider / token-manager 共用同一个 `getKiroClientProfile()` 源的
-  // 唯一路径——任何 body 形态偏离都会被这里和 client-profile 测试同时拦住。
+describe('convertRequest - kiro-cli V3 (KAS) body shape', () => {
+  // converter 按 kiro-cli `chat --v3`(KAS)的抓包形态输出 body,值来自 client profile 的 kas 身份。
+  // 空集合的省略发生在序列化出口,所以对 wire 断言。
 
-  it('KIRO_CLI origin + envState on current message + os renders to current platform', () => {
-    const req = baseRequest({
-      messages: [
-        { role: 'user', content: 'earlier' },
-        { role: 'assistant', content: 'ok' },
-        { role: 'user', content: 'hello' },
-      ],
-    });
-    const result = convertRequest(req);
+  const wire = (req: MessagesRequest) =>
+    JSON.parse(
+      serializeKiroRequest(toKiroRequest(convertRequest(req, { identityOverride: false }))),
+    );
 
-    const uim = result.conversationState.currentMessage.userInputMessage;
-    expect(uim.origin).toBe('KIRO_CLI');
-    expect(result.conversationState.agentTaskType).toBe('vibe');
-    expect(result.conversationState.chatTriggerType).toBe('MANUAL');
-
-    const envState = uim.userInputMessageContext.envState;
-    expect(envState).toBeDefined();
-    expect(envState?.operatingSystem).toMatch(/^(macos|linux|windows)$/);
-    expect(envState?.currentWorkingDirectory).toBe(process.cwd());
+  it('origin AI_EDITOR on current and history messages, no V2 envState / messageId', () => {
+    const body = wire(
+      baseRequest({
+        messages: [
+          { role: 'user', content: 'earlier' },
+          {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'toolu_1', name: 'read', input: {} }],
+          },
+          {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'x' }],
+          },
+          { role: 'assistant', content: 'ok' },
+          { role: 'user', content: 'hello' },
+        ],
+        tools: [{ name: 'read', description: 'r', input_schema: { type: 'object' } }],
+      }),
+    );
+    const cs = body.conversationState;
+    expect(cs.currentMessage.userInputMessage.origin).toBe('AI_EDITOR');
+    for (const h of cs.history) {
+      if (h.userInputMessage) expect(h.userInputMessage.origin).toBe('AI_EDITOR');
+    }
+    expect(cs.agentTaskType).toBe('vibe');
+    expect(cs.chatTriggerType).toBe('MANUAL');
+    expect(body.agentMode).toBe('vibe');
+    const text = JSON.stringify(body);
+    expect(text).not.toContain('envState');
+    expect(text).not.toContain('messageId');
+    expect(text).not.toContain('KIRO_CLI');
   });
 
-  it('history user messages also carry KIRO_CLI origin + envState', () => {
-    const req = baseRequest({
-      messages: [
-        { role: 'user', content: 'earlier' },
-        { role: 'assistant', content: 'ok' },
-        { role: 'user', content: 'hello' },
-      ],
-    });
-    const result = convertRequest(req);
+  it('omits empty collections like KAS: no context on plain history users, no empty toolResults/images', () => {
+    const body = wire(
+      baseRequest({
+        messages: [
+          { role: 'user', content: 'earlier' },
+          { role: 'assistant', content: 'ok' },
+          { role: 'user', content: 'hello' },
+        ],
+        tools: [{ name: 'read', description: 'r', input_schema: { type: 'object' } }],
+      }),
+    );
+    const cs = body.conversationState;
+    expect(cs.history[0].userInputMessage).not.toHaveProperty('userInputMessageContext');
+    expect(cs.history[0].userInputMessage).not.toHaveProperty('images');
+    const current = cs.currentMessage.userInputMessage;
+    expect(current.userInputMessageContext).not.toHaveProperty('toolResults');
+    expect(current.userInputMessageContext.tools).toHaveLength(1);
+    expect(current).not.toHaveProperty('images');
+  });
 
-    const firstUserHistory = result.conversationState.history.find((m) => m.kind === 'user');
-    expect(firstUserHistory).toBeDefined();
-    if (firstUserHistory?.kind === 'user') {
-      expect(firstUserHistory.userInputMessage.origin).toBe('KIRO_CLI');
-      const envState = firstUserHistory.userInputMessage.userInputMessageContext.envState;
-      expect(envState).toBeDefined();
-      expect(envState?.currentWorkingDirectory).toBe(process.cwd());
-    }
+  it('conversationId is a KAS session id and rootConversationId points at itself', () => {
+    const body = wire(baseRequest({ messages: [{ role: 'user', content: 'hi' }] }));
+    const cs = body.conversationState;
+    expect(cs.conversationId).toMatch(/^sess_[0-9a-f-]{36}$/);
+    expect(cs.rootConversationId).toBe(cs.conversationId);
   });
 });
 
@@ -260,8 +284,8 @@ describe('convertRequest - tool description cap', () => {
     });
 
   it('does not truncate a description within the default 32768 cap', () => {
-    // 20000 > 旧的 10000 硬上限,但小于新默认 32768(32K) —— Workflow(18780)这类合法
-    // 大工具描述不再被截。实测 Kiro 接受 >=1,000,000 字符,10000 曾是过度保守。
+    // 20000 < 默认 32768(32K):Workflow(18780)这类合法大工具描述不能被截。
+    // 实测 Kiro 接受 >=1,000,000 字符,cap 只防单个畸形 description。
     const tools = descOf(convertRequest(reqWithDesc('x'.repeat(20000))));
     expect(tools.length).toBe(20000);
   });
@@ -766,7 +790,9 @@ describe('convertRequest - session ID extraction', () => {
     });
 
     const result = convertRequest(req);
-    expect(result.conversationState.conversationId).toBe('00000000-0000-4000-8000-000000000000');
+    expect(result.conversationState.conversationId).toBe(
+      deriveConversationId('00000000-0000-4000-8000-000000000000'),
+    );
   });
 
   it('test_convert_request_without_metadata', () => {
@@ -774,10 +800,8 @@ describe('convertRequest - session ID extraction', () => {
       messages: [{ role: 'user', content: 'Hello' }],
     });
     const result = convertRequest(req);
-    // Should be a UUID
-    expect(result.conversationState.conversationId.length).toBe(36);
-    const dashes = (result.conversationState.conversationId.match(/-/g) ?? []).length;
-    expect(dashes).toBe(4);
+    // KAS 形态的随机会话 id
+    expect(result.conversationState.conversationId).toMatch(/^sess_[0-9a-f-]{36}$/);
   });
 });
 
@@ -812,9 +836,8 @@ describe('convertRequest - assistant message conversion', () => {
     for (const msg of result.conversationState.history) {
       if (msg.kind === 'assistant') {
         const am = msg.assistantResponseMessage;
-        // content cannot be empty; should be ' ' placeholder
-        expect(am.content.length).toBeGreaterThan(0);
-        expect(am.content).toBe(' ');
+        // 只有 tool_use 时同 KAS 发空串
+        expect(am.content).toBe('');
         const toolUses = am.toolUses!;
         expect(toolUses.length).toBe(1);
         expect(toolUses[0].toolUseId).toBe('toolu_01ABC');
@@ -861,6 +884,74 @@ describe('convertRequest - assistant message conversion', () => {
       }
     }
     expect(found).toBe(true);
+  });
+});
+
+describe('convertRequest - hosted web search in history', () => {
+  const longSnippet = `${'fact '.repeat(80)}END_OF_SNIPPET`;
+  const searchTurn = (extra: Record<string, unknown>[] = []) =>
+    baseRequest({
+      messages: [
+        { role: 'user', content: 'search for x' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'I\'ll search for "x".' },
+            {
+              type: 'server_tool_use',
+              id: 'srvtoolu_1',
+              name: 'web_search',
+              input: { query: 'x' },
+            },
+            {
+              type: 'web_search_tool_result',
+              tool_use_id: 'srvtoolu_1',
+              content: [
+                {
+                  type: 'web_search_result',
+                  title: 't',
+                  url: 'https://a.example',
+                  encrypted_content: longSnippet,
+                },
+              ],
+            },
+            { type: 'text', text: `1. **t**\n   ${longSnippet}\n   Source: https://a.example` },
+            ...extra,
+          ],
+        },
+        { role: 'user', content: 'what did you find?' },
+      ],
+    });
+
+  it('keeps the full summary text and drops the structural search blocks without warning', () => {
+    const warnSpy = vi.spyOn(logger, 'warn');
+    try {
+      const result = convertRequest(searchTurn());
+      const assistant = result.conversationState.history.find((m) => m.kind === 'assistant');
+      expect(
+        assistant?.kind === 'assistant' && assistant.assistantResponseMessage.content,
+      ).toContain('END_OF_SNIPPET');
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ msg: 'dropping unsupported assistant content block' }),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('warns when an unknown assistant block type is dropped', () => {
+    const warnSpy = vi.spyOn(logger, 'warn');
+    try {
+      convertRequest(searchTurn([{ type: 'mcp_tool_use', id: 'mcp_1', name: 'x', input: {} }]));
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          msg: 'dropping unsupported assistant content block',
+          block_type: 'mcp_tool_use',
+        }),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
@@ -914,8 +1005,7 @@ describe('convertRequest - merge consecutive assistant messages (Issue #79)', ()
 
 describe('convertRequest - system text folds into the first user message', () => {
   // Kiro 没有 system 字段,additionalContext 上游静默丢弃(2026-09-10 实测),system 只能作为
-  // user 文本进模型。契约:前置到**首条** user 消息正文,不造任何 assistant 轮次(旧实现的
-  // `user: system / assistant: "I will follow these instructions."` 假对话对已移除,见
+  // user 文本进模型。契约:前置到**首条** user 消息正文,不造任何 assistant 轮次(守卫见
   // test/static/no-fabricated-turns.test.ts)。baseRequest 的 claude-sonnet-4 非原生 reasoning,
   // 网关不注入任何 thinking 前缀,故可以整串 toBe 精确钉形态。
   const SYSTEM = 'You are a helpful coding assistant.';
@@ -982,7 +1072,7 @@ describe('convertRequest - system text folds into the first user message', () =>
   it('block-array first user message: same wire bytes as the string form, other blocks are kept', () => {
     // The prefix is joined on the Kiro message after the client content has been
     // flattened, so the two Anthropic-equivalent spellings of one request cannot
-    // drift apart (they once did: "SYS\n\nhello" vs "SYS\nhello"). Claude Code and
+    // drift apart (e.g. "SYS\n\nhello" vs "SYS\nhello"). Claude Code and
     // Codex both send block arrays; the byte-exact cases above use strings.
     const asString = withSystem([{ role: 'user', content: 'look' }]);
     const result = withSystem([
@@ -1271,8 +1361,8 @@ describe('convertRequest - non-native models get no thinking control at all', ()
 });
 
 describe('convertRequest - trailing run of user messages is the current turn', () => {
-  // Anthropic 语义:连续同角色消息是一轮。旧实现把末尾连串的前几条塞进 history 并补一条
-  // 假 assistant "OK",下一轮同一段又被 mergeUserMessages 合并成一条——形态随轮次漂移。
+  // Anthropic 语义:连续同角色消息是一轮。末尾连串整体是 currentMessage,不拆进 history、
+  // 不补假 assistant "OK";否则下一轮同一段被 mergeUserMessages 合并成一条,形态随轮次漂移。
   const convert = (messages: MessagesRequest['messages']) =>
     convertRequest(baseRequest({ messages })).conversationState;
 
@@ -1594,9 +1684,9 @@ describe('interleaved system-role messages (Claude Code <system-reminder> blocks
 // Orphaned tool_use → synthesized tool_result
 // ============================================================================
 //
-// 回归护栏。历史实现把未配对的 tool_use 从 history 里**删掉**以满足 Kiro 的配对
-// 约束,代价是模型失忆 + 客户端零感知(收到正常 200,只有网关日志留痕)。现在改为
-// 补一条 isError 的 tool_result:约束照样满足,模型看得到「这次调用被中断」。
+// 回归护栏。未配对的 tool_use 补一条 status:error 的 tool_result 满足 Kiro 的配对约束,
+// tool_use 本身不删:删掉会让模型失忆且客户端零感知(收到正常 200,只有网关日志留痕),
+// 补齐则模型看得到「这次调用被中断」。
 // 生产实测该场景会固化在客户端会话里反复重发(同一 tool_use_id 跨 12 个 reqId)。
 
 describe('convertRequest - orphaned tool_use gets a synthesized tool_result', () => {
@@ -1638,11 +1728,11 @@ describe('convertRequest - orphaned tool_use gets a synthesized tool_result', ()
 
     // 真实结果原样保留
     expect(done).toBeDefined();
-    expect(done?.isError).not.toBe(true);
+    expect(done?.status).not.toBe('error');
 
-    // 被打断的那个补上了 isError 结果，而不是消失
+    // 被打断的那个补上了 error 结果，而不是消失
     expect(cut).toBeDefined();
-    expect(cut?.isError).toBe(true);
+    expect(cut?.status).toBe('error');
     expect(cut?.status).toBe('error');
     expect(JSON.stringify(cut?.content)).toContain(INTERRUPTED_TOOL_RESULT_TEXT);
 
@@ -1690,7 +1780,7 @@ describe('convertRequest - orphaned tool_use gets a synthesized tool_result', ()
 
     const inHistory = allToolResults(state).find((r) => r.toolUseId === 'toolu_dropped');
     expect(inHistory).toBeDefined();
-    expect(inHistory?.isError).toBe(true);
+    expect(inHistory?.status).toBe('error');
 
     // 该 tool_result 必须紧跟在带它 tool_use 的 assistant 之后那条 user 上
     const idx = state.history.findIndex(
@@ -1709,7 +1799,7 @@ describe('convertRequest - orphaned tool_use gets a synthesized tool_result', ()
   });
 
   it('keeps the orphan tool visible to tool-definition collection (placeholder still created)', () => {
-    // tool_use 不再被删 → collectHistoryToolNames 仍看得见它 → 第 10 步照常补
+    // tool_use 留在 history 里 → collectHistoryToolNames 看得见它 → 第 10 步照常补
     // placeholder 定义。上游需要这个定义才认历史里的调用。
     const state = convertRequest(
       baseRequest({
@@ -1766,9 +1856,8 @@ describe('convertRequest - orphaned tool_use gets a synthesized tool_result', ()
   });
 
   it('synthesizes at most one result per tool_use_id even if the id repeats in history', () => {
-    // 幂等守卫。旧的「删除 tool_use」实现天然幂等(删两遍等于删一遍);改成补齐
-    // 之后,同一个 id 若出现在两条 assistant 上,逐条合成会产出两份 tool_result、
-    // 挂到两条不同 user 消息上 —— 正好是本函数要消除的那类坏配对。
+    // 幂等守卫。同一个 id 若出现在两条 assistant 上,逐条合成会产出两份 tool_result、
+    // 挂到两条不同 user 消息上 —— 正好是本函数要消除的那类坏配对;每个 id 只补一份。
     const state = convertRequest(
       baseRequest({
         messages: [
@@ -1792,6 +1881,6 @@ describe('convertRequest - orphaned tool_use gets a synthesized tool_result', ()
 
     const forDup = allToolResults(state).filter((r) => r.toolUseId === 'toolu_dup');
     expect(forDup).toHaveLength(1);
-    expect(forDup[0]?.isError).toBe(true);
+    expect(forDup[0]?.status).toBe('error');
   });
 });

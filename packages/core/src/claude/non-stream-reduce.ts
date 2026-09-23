@@ -6,22 +6,23 @@
  * `<thinking>` 提取 → 泄漏工具调用救援(坑「工具调用文本泄漏」) → stop_reason 定稿 →
  * silent-failure 判定。
  *
- * 抽出来的动机:Claude 非流式 handler 与 OpenAI 非流式 handler 共用这套
- * 语义,只在「重试循环 + 计费 hook + 响应体形状」上分叉。让归约逻辑(含
- * 救援这类 #14 敏感代码)只有一份真相源,两端自动同步,杜绝漂移。被
- * `midstream-error` / `empty-retry` / `reasoning-native` 现有测试覆盖。
+ * Claude 非流式 handler 与 OpenAI 非流式 handler 共用这套语义,只在「重试循环 +
+ * 计费 hook + 响应体形状」上分叉。归约逻辑(含救援这类敏感代码)只有一份真相源,
+ * 两端自动同步,杜绝漂移。测试见 `midstream-error` / `empty-retry` / `reasoning-native`。
  */
 
 import { v4 as uuidv4 } from 'uuid';
 import type { Event, KiroMeteringData } from '../kiro/model/events/base.js';
 import { eventFromFrame } from '../kiro/model/events/base.js';
+import type { ReasoningContent } from '../kiro/model/requests/conversation.js';
 import { EventStreamDecoder } from '../kiro/parser/decoder.js';
 import { getLogger } from '../shared/logger.js';
-import { resolveContextUsage } from './converter.js';
+import { clientModelHasEncryptedReasoning, resolveContextUsage } from './converter.js';
 import {
   LegacyThinkingDecoder,
   type LegacyThinkingDecoderItem,
 } from './stream/legacy-thinking-decoder.js';
+import { OpaqueReasoningAccumulator } from './stream/opaque-reasoning.js';
 import {
   assertNever,
   classifyUpstreamErrorEvent,
@@ -34,11 +35,11 @@ import { parseCompletedToolInput, ToolUseSequence } from './tool-use-sequence.js
 
 /** 一次上游响应归约后的完整结果。 */
 export interface ReducedAttempt {
-  /** 原生 reasoning 累积(GPT redacted 不入,保持空;Claude 明文累积) */
+  /** 原生 reasoning 累积(GPT 的不透明推理不入,保持空;Claude 明文累积) */
   reasoningText: string;
   reasoningSignature: string | undefined;
-  /** GPT 加密推理(多帧取最后一帧);只供 Responses 的 `encrypted_content` 往返,不进可见输出 */
-  redactedReasoning: string | undefined;
+  /** GPT 的不透明推理(见 `stream/opaque-reasoning.ts`);只供往返信封,不进可见输出 */
+  opaqueReasoning: ReasoningContent | undefined;
   /** legacy `<thinking>` 标签提取出的思考(与 reasoningText 互斥) */
   thinkingText: string | undefined;
   /** 提取 thinking + 救援后的最终可见文本 */
@@ -69,9 +70,7 @@ export function reducedReasoning(reduced: ReducedAttempt): string {
   return reduced.reasoningText || reduced.thinkingText || '';
 }
 
-/**
- * 归约一次上游响应 body。行为与旧 non-stream-handler 内联循环逐字节一致。
- */
+/** 归约一次上游响应 body(纯函数;重试与计费留给调用方)。 */
 export function reduceKiroResponse(
   bodyBytes: Buffer,
   model: string,
@@ -134,7 +133,10 @@ export function reduceKiroResponse(
   // 跳过 legacy 文本 framing；text/signature 决定是否有可 surface 的 thinking。
   let reasoningText = '';
   let reasoningSignature: string | undefined;
-  let redactedReasoning: string | undefined;
+  // 与流式 StreamContext 同源:GPT 的推理帧只累积、不作为 thinking(见 opaque-reasoning.ts)
+  const opaqueAcc = clientModelHasEncryptedReasoning(model)
+    ? new OpaqueReasoningAccumulator()
+    : undefined;
 
   // Collect tool call incremental JSON
   const toolJsonBuffers = new Map<string, string>();
@@ -187,21 +189,26 @@ export function reduceKiroResponse(
         if (legacyDecoder) collectLegacyItems(legacyDecoder.feed(event.content));
         break;
 
-      case 'ReasoningContent':
+      case 'ReasoningContent': {
         // 任意原生帧都是权威的（含空/redacted）。保留一份 raw AssistantResponse
         // 副本，好让晚到的原生帧作废试探性的 legacy 分类而不丢失可见字节。
         //
         // ★ 与流式 `processReasoningContent` 同源的边界:空帧只能作废**尚未
         // 落定**的分类。thinking 块已经开着时不能退掉 decoder——否则剩下的私有
         // 推理连同字面 `</thinking>` 会掉进可见文本。
-        if (event.redactedContent) redactedReasoning = event.redactedContent;
-        if (!event.text && !event.signature && legacyDecoder?.hasOpenThinking) break;
+        //
+        // GPT 帧只累积供回传,之后按空帧走同一条原生接管(同流式 `processReasoningContent('', undefined)`)。
+        opaqueAcc?.push(event);
+        const text = opaqueAcc ? '' : event.text;
+        const signature = opaqueAcc ? undefined : event.signature;
+        if (!text && !signature && legacyDecoder?.hasOpenThinking) break;
 
         sawReasoningContentEvent = true;
         legacyDecoder = undefined;
-        reasoningText += event.text;
-        if (event.signature) reasoningSignature = event.signature;
+        reasoningText += text;
+        if (signature) reasoningSignature = signature;
         break;
+      }
 
       case 'ToolUse': {
         try {
@@ -268,8 +275,8 @@ export function reduceKiroResponse(
       }
 
       case 'Error':
-        // 上游 error 帧:此前落 default 被静默吞掉(无日志、无客户端错误)。
-        // 现在记日志 + 分类(retryable),drain 后明确报错。
+        // 上游 error 帧:记日志 + 分类(retryable),drain 后明确报错——不能静默吞掉
+        // (无日志、无客户端错误)。
         log.error({
           msg: 'received error event from upstream (non-stream)',
           error_code: event.errorCode,
@@ -281,8 +288,7 @@ export function reduceKiroResponse(
       case 'Exception': {
         const classified = classifyUpstreamErrorEvent(event);
         if (classified === undefined) {
-          // ContentLengthExceededException = 合法的 max_tokens 终止,保持原行为
-          // (不记为错误、不打日志)。
+          // ContentLengthExceededException = 合法的 max_tokens 终止,不记为错误、不打日志。
           stopReason = 'max_tokens';
         } else {
           log.warn({
@@ -390,8 +396,8 @@ export function reduceKiroResponse(
     // 残缺调用在上面已被丢弃,报 tool_use 会让客户端等一个不存在的工具调用。
     // ⚠ `hasContent` 是必要守卫、且必须是**完整**的那一份:只发过「有名字、零 input」
     // 空壳帧的纯截断三项皆假 → 留在判空路径(与流式「空壳帧 = 确定性空流」同源);
-    // 但凡有过文本 / input 分片 / thinking / 已完成调用,都要走这里。曾经这里只写
-    // `toolUses.length > 0`,于是「先说一段话再宣告工具然后断流」落进下面的
+    // 但凡有过文本 / input 分片 / thinking / 已完成调用,都要走这里。只看
+    // `toolUses.length > 0` 会让「先说一段话再宣告工具然后断流」落进下面的
     // `else if (hasToolUse)` → 终态 `tool_use` 却一个 block 都没有(OpenAI 侧更糟:
     // `finish_reason:"tool_calls"` 而无 `tool_calls` 字段),而流式对同一份字节报
     // `max_tokens`。
@@ -449,7 +455,7 @@ export function reduceKiroResponse(
   return {
     reasoningText,
     reasoningSignature,
-    redactedReasoning,
+    opaqueReasoning: opaqueAcc?.result,
     thinkingText,
     textContent,
     toolUses,

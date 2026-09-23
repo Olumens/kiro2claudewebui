@@ -9,13 +9,11 @@ import {
 describe('ToolResult', () => {
   it('test_tool_result_success', () => {
     const result = toolResultSuccess('tool-123', 'Operation completed');
-    expect(result.isError).toBe(false);
     expect(result.status).toBe('success');
   });
 
   it('test_tool_result_error', () => {
     const result = toolResultError('tool-456', 'File not found');
-    expect(result.isError).toBe(true);
     expect(result.status).toBe('error');
   });
 
@@ -24,11 +22,9 @@ describe('ToolResult', () => {
     const json = JSON.stringify(result);
     expect(json).toContain('"toolUseId":"tool-789"');
     expect(json).toContain('"status":"success"');
-    // `isError` is always serialized (including when false), so assert
-    // on the presence of the explicit `"isError":false` field rather than
-    // its absence. This is intentional: the Kiro backend accepts both
-    // forms, and emitting the field explicitly is less surprising to read.
-    expect(json).toContain('"isError":false');
+    // Like kiro-cli (KAS), success/failure rides on `status` only; `isError` is not sent
+    // (see the control experiment in the ToolResult doc comment).
+    expect(json).not.toContain('isError');
   });
 });
 

@@ -13,7 +13,8 @@ import type { MessagesRequest } from './types.js';
  * Check model name for a "thinking" suffix and turn thinking on.
  *
  * 只有 adaptive 一种语义(`budget_tokens` 不支持):`-thinking` 后缀 =
- * `thinking:{type:"adaptive"}`,effort 取客户端已给的 `output_config.effort`,没给则 high。
+ * `thinking:{type:"adaptive"}`,effort 取客户端已给的 `output_config.effort`,没给则同未加后缀
+ * 一样按模型默认档位(`defaultEffort`)。
  * 只对原生 reasoning 模型有效(落到顶层 `additionalModelRequestFields`);非原生模型不做
  * thinking 控制,后缀对它们是空操作。这里不区分模型,路由在 converter 的 `usesNativeReasoning`。
  *
@@ -31,6 +32,5 @@ export function overrideThinkingFromModelName(payload: MessagesRequest): void {
     thinking_type: 'adaptive',
   });
 
-  payload.thinking = { type: 'adaptive' };
-  payload.output_config ??= { effort: 'high' };
+  payload.thinking = { ...payload.thinking, type: 'adaptive' };
 }

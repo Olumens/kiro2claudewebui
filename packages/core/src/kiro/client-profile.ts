@@ -1,12 +1,12 @@
 /**
  * Kiro CLI 客户端画像（client profile）
  *
- * 集中管理 kiro2claude 向上游伪装成 kiro-cli 时使用的请求形态：
- * - User-Agent / x-amz-user-agent 模板（带 `{service}` / `{os}` 占位符）
- * - x-amz-target / Content-Type 等静态头部
- * - body 内的语义字段（origin / agentTaskType / envState.operatingSystem 等）
+ * 集中管理 kiro2claude 向上游模拟 kiro-cli `chat --v3` 时使用的请求形态,分两个身份:
+ * - `kas`:KAS(对话子进程)发的 GAR / InvokeMCP——头、UA 模板、target、body 语义字段
+ *   (origin / agentMode / agentTaskType / chatTriggerType)
+ * - `shell`:Rust 外壳发的 GetUsageLimits
  *
- * 这个模块是 kiro2claude 唯一的客户端伪装路径——`provider.ts`、
+ * 这个模块是 kiro2claude 唯一的客户端模拟路径——`provider.ts`、
  * `token-manager.ts`、`converter.ts` 都会从这里取 UA / target / body
  * 字段，确保三端使用同一套 kiro-cli 画像，不会偷偷漂移。
  *
@@ -20,6 +20,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,45 +31,58 @@ import { expandTilde, findUpwards } from '../shared/paths.js';
 // 类型
 // ---------------------------------------------------------------------------
 
-/** kiro-cli 调用的上游服务标识（用于 UA 里的 `api/{service}/...`） */
-export type KiroServiceId = 'codewhispererstreaming' | 'codewhispererruntime';
-
-/** x-amz-target 所映射的操作类型 */
-export type KiroTargetKey =
+/** KAS 发出的请求 → x-amz-target。网关只发前两个;其余随抓包保留,供对照。 */
+export type KasTargetKey =
   | 'generateAssistantResponse'
   | 'invokeMcp'
-  | 'sendTelemetryEvent'
+  | 'getFeatureConfiguration'
   | 'listAvailableModels'
-  | 'getProfile'
-  | 'getUsageLimits';
+  | 'getProfile';
+
+/**
+ * KAS(kiro-cli `chat --v3` 的对话子进程 `@kiro/agent`)的请求身份:对话(GAR)与
+ * web_search(InvokeMCP)都以它的形态发出。
+ */
+export interface KasIdentity {
+  /** GAR 的静态头 */
+  staticHeaders: Record<string, string>;
+  /** InvokeMCP 的静态头(KAS 不给 MCP 发 attribution 头) */
+  mcpStaticHeaders: Record<string, string>;
+  /**
+   * UA 模板:`{jsOs}` 渲染成 Node 风格的 `<platform>#<release>`,`{os}` 渲染成 kiro-cli 风格的
+   * `macos` / `linux` / `windows`。`md/nodejs#…` 是 kiro-cli 自带 Node 的版本,原样保留。
+   */
+  userAgent: string;
+  xAmzUserAgent: string;
+  amzTargets: Partial<Record<KasTargetKey, string>>;
+  /** body 里的语义字段 */
+  body: {
+    origin: string;
+    /** 顶层 `agentMode`:主会话 */
+    agentMode: string;
+    /** 顶层 `agentMode`:subagent 会话(KAS `invoke_sub_agent` 的实测值) */
+    subagentAgentMode: string;
+    agentTaskType: string;
+    chatTriggerType: string;
+  };
+}
+
+/** kiro-cli Rust 外壳的请求身份:网关只用它发 GetUsageLimits(V3 下额度查询由外壳而非 KAS 发)。 */
+export interface ShellIdentity {
+  staticHeaders: Record<string, string>;
+  /** UA 模板:`{service}` 为服务标识,`{os}` 同 KAS */
+  userAgent: string;
+  xAmzUserAgent: string;
+  amzTargets: { getUsageLimits: string };
+}
 
 export interface KiroClientProfile {
   /** 固定为 'kiro-cli'——这个模块只承载 kiro-cli 仿真画像 */
   readonly mode: 'kiro-cli';
-  /** 捕获时的 kiro-cli 版本，仅用于日志 */
+  /** 捕获时的 kiro-cli 版本 */
   kiroCliVersion: string;
-  /** 静态头部（逐次请求都一样） */
-  staticHeaders: Record<string, string>;
-  /**
-   * UA 模板，`{service}` 会被替换成具体的服务标识，`{os}` 会被替换成
-   * 运行时平台的 kiro-cli 风格字符串（`macos` / `linux` / `windows`）。
-   * 例如：`aws-sdk-rust/1.3.15 ua/2.1 api/{service}/0.1.16551 os/{os} …`
-   */
-  userAgent: string;
-  /** 同上，对应 `x-amz-user-agent` 头 */
-  xAmzUserAgent: string;
-  /** x-amz-target 映射：按 target key 取实际发送的字符串 */
-  amzTargets: Partial<Record<KiroTargetKey, string>>;
-  /** body 里需要塞的语义字段 */
-  body: {
-    origin: string;
-    agentTaskType: string;
-    chatTriggerType: string;
-    envState: {
-      /** 同样支持 `{os}` 占位符，render 时按 process.platform 替换 */
-      operatingSystem: string;
-    };
-  };
+  kas: KasIdentity;
+  shell: ShellIdentity;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,52 +90,61 @@ export interface KiroClientProfile {
 // ---------------------------------------------------------------------------
 
 /**
- * 兜底 profile。当 fixture 文件不存在或加载失败时使用。
- * 数值来源：2026-06 kiro-cli 2.7.0 实测抓包（一次性快照，不维护同步）。
- * 例外：`x-amzn-codewhisperer-optout` 固定 `'true'`（项目隐私硬约束，绝不参与
- * 上游训练 / 遥测），不取抓包值——与 fixture 的归一化立场一致。
+ * 兜底 profile。当 fixture 文件不存在、加载失败或缺 `kas` 段(V2 形态)时使用。
+ * 数值来源:2026-09 kiro-cli 2.23.1 `chat --v3` 实测抓包(一次性快照,不维护同步)。
+ * 例外:`x-amzn-codewhisperer-optout` 固定 `'true'`(项目隐私硬约束,绝不参与
+ * 上游训练 / 遥测),不取抓包值——与 fixture 的归一化立场一致。
  *
  * **kiroCliVersion 字段固定为 'unknown'**——版本号的唯一真相源是
  * `fixtures/kiro-cli-profile.json` 的 `kiroCliVersion`。FALLBACK 触发
- * 时说明 fixture 不可用，此时显示具体版本号反而误导，'unknown' 是
- * 诚实的状态报告。
+ * 时说明 fixture 不可用,此时显示具体版本号反而误导。
  *
- * 其它字段（userAgent / xAmzUserAgent 等）保留快照时点的具体值——它们
- * 是 kiro-cli 真实 UA 的 token，runtime 用这些值伪装时必须保持完整形态，
- * 不能 'unknown'。可以 stale，但必须 wire-format 合法。
- *
- * `{os}` 占位符意味着：这个 profile 可以同时在 macOS 和 Linux
- * 运行时使用，runtime 决定 os token。
+ * UA 等字段保留快照时点的具体值:可以 stale,但必须 wire-format 合法。
  */
 const FALLBACK_PROFILE: KiroClientProfile = {
   mode: 'kiro-cli',
   kiroCliVersion: 'unknown',
-  staticHeaders: {
-    'content-type': 'application/x-amz-json-1.0',
-    // 隐私硬约束：始终 opt-out，绝不让对话数据被上游用于训练。与 fixture 同立场。
-    'x-amzn-codewhisperer-optout': 'true',
-    accept: '*/*',
-    'accept-encoding': 'gzip',
-  },
-  userAgent:
-    'aws-sdk-rust/1.3.15 ua/2.1 api/{service}/0.1.16551 os/{os} lang/rust/1.92.0 md/appVersion-2.7.0 app/AmazonQ-For-CLI',
-  xAmzUserAgent:
-    'aws-sdk-rust/1.3.15 ua/2.1 api/{service}/0.1.16551 os/{os} lang/rust/1.92.0 m/F app/AmazonQ-For-CLI',
-  amzTargets: {
-    generateAssistantResponse: 'AmazonCodeWhispererStreamingService.GenerateAssistantResponse',
-    invokeMcp: 'AmazonCodeWhispererStreamingService.InvokeMCP',
-    sendTelemetryEvent: 'AmazonCodeWhispererService.SendTelemetryEvent',
-    listAvailableModels: 'AmazonCodeWhispererService.ListAvailableModels',
-    getProfile: 'AmazonCodeWhispererService.GetProfile',
-    getUsageLimits: 'AmazonCodeWhispererService.GetUsageLimits',
-  },
-  body: {
-    origin: 'KIRO_CLI',
-    agentTaskType: 'vibe',
-    chatTriggerType: 'MANUAL',
-    envState: {
-      operatingSystem: '{os}',
+  kas: {
+    staticHeaders: {
+      'content-type': 'application/x-amz-json-1.0',
+      // 隐私硬约束:始终 opt-out,绝不让对话数据被上游用于训练。与 fixture 同立场。
+      'x-amzn-codewhisperer-optout': 'true',
+      'x-amzn-kiro-client-attribution': 'unrecognized',
+      connection: 'keep-alive',
     },
+    mcpStaticHeaders: {
+      'content-type': 'application/x-amz-json-1.0',
+      'x-amzn-codewhisperer-optout': 'true',
+      connection: 'keep-alive',
+    },
+    userAgent:
+      'aws-sdk-js/1.0.0 ua/2.1 os/{jsOs} lang/js md/nodejs#22.22.2 api/kiroruntime#1.0.0 m/N KiroCLI/2.23.1 KAS/0.66.8 os/{os} md/appVersion-2.23.1 app/AmazonQ-For-CLI',
+    xAmzUserAgent:
+      'aws-sdk-js/1.0.0 KiroCLI/2.23.1 KAS/0.66.8 os/{os} md/appVersion-2.23.1 app/AmazonQ-For-CLI',
+    amzTargets: {
+      generateAssistantResponse: 'KiroRuntimeService.GenerateAssistantResponse',
+      invokeMcp: 'KiroRuntimeService.InvokeMCP',
+    },
+    body: {
+      origin: 'AI_EDITOR',
+      agentMode: 'vibe',
+      subagentAgentMode: 'general-task-execution',
+      agentTaskType: 'vibe',
+      chatTriggerType: 'MANUAL',
+    },
+  },
+  shell: {
+    staticHeaders: {
+      'content-type': 'application/x-amz-json-1.0',
+      'x-amzn-codewhisperer-optout': 'true',
+      accept: '*/*',
+      'accept-encoding': 'gzip',
+    },
+    userAgent:
+      'aws-sdk-rust/1.3.10 ua/2.1 api/{service}/0.1.10231 os/{os} lang/rust/1.92.0 md/appVersion-2.23.1 app/AmazonQ-For-CLI',
+    xAmzUserAgent:
+      'aws-sdk-rust/1.3.10 ua/2.1 api/{service}/0.1.10231 os/{os} lang/rust/1.92.0 m/F,C app/AmazonQ-For-CLI',
+    amzTargets: { getUsageLimits: 'AmazonCodeWhispererService.GetUsageLimits' },
   },
 };
 
@@ -130,26 +153,31 @@ const FALLBACK_PROFILE: KiroClientProfile = {
 // ---------------------------------------------------------------------------
 
 /**
- * 把任意 kiro-cli 风格的 os token（`macos` / `linux` / `windows`）替换成 `{os}` 占位符。
+ * 把 UA 里的具体平台 token 换回占位符:Node 风格的 `os/<platform>#<release>` → `os/{jsOs}`,
+ * kiro-cli 风格的 `os/macos|linux|windows` → `os/{os}`。
  *
- * `scripts/capture-kiro-cli.sh` 已经在写 fixture 时做了同样的替换，但手工编辑的 fixture
- * 或 FALLBACK_PROFILE 仍然可能留下具体 os——这里做兜底归一化，保证 macOS 抓的画像部署
- * 到 Linux 容器也能工作。
+ * `scripts/capture-kiro-cli.sh` 写 fixture 时已经做过,这里给手工编辑的 fixture 兜底,
+ * 保证 macOS 抓的画像部署到 Linux 容器也不会暴露抓包机平台。先换 `{jsOs}`,否则
+ * `os/linux#…` 会被第二条规则截成 `os/{os}#…`。
  */
+function normalizeUa(ua: string): string {
+  return ua
+    .replace(/\bos\/(darwin|linux|win32)#[^\s]+/g, 'os/{jsOs}')
+    .replace(/\bos\/(macos|linux|windows)\b/g, 'os/{os}');
+}
+
 function normalizeProfileOs(profile: KiroClientProfile): KiroClientProfile {
-  const replaceOs = (s: string) => s.replace(/\bos\/(macos|linux|windows)\b/g, 'os/{os}');
   return {
     ...profile,
-    userAgent: replaceOs(profile.userAgent),
-    xAmzUserAgent: replaceOs(profile.xAmzUserAgent),
-    body: {
-      ...profile.body,
-      envState: {
-        ...profile.body.envState,
-        operatingSystem: /^(macos|linux|windows)$/.test(profile.body.envState.operatingSystem)
-          ? '{os}'
-          : profile.body.envState.operatingSystem,
-      },
+    kas: {
+      ...profile.kas,
+      userAgent: normalizeUa(profile.kas.userAgent),
+      xAmzUserAgent: normalizeUa(profile.kas.xAmzUserAgent),
+    },
+    shell: {
+      ...profile.shell,
+      userAgent: normalizeUa(profile.shell.userAgent),
+      xAmzUserAgent: normalizeUa(profile.shell.xAmzUserAgent),
     },
   };
 }
@@ -169,61 +197,86 @@ function currentOsToken(): string {
   }
 }
 
+/** KAS(aws-sdk-js)在 UA 里写的平台:`<process.platform>#<os.release()>`,真实 KAS 在同一台机器上也这样报。 */
+const JS_OS_TOKEN = `${process.platform}#${os.release()}`;
+
+/** Rust 外壳调用的上游服务标识(shell UA 里的 `api/{service}/...`);网关只经外壳发 GetUsageLimits */
+const SHELL_SERVICE_ID = 'codewhispererruntime';
+
 // ---------------------------------------------------------------------------
 // 加载
 // ---------------------------------------------------------------------------
 
-/** 把 capture 脚本产出的原始 JSON 规范化为 `KiroClientProfile` */
+const asStringRecord = (v: unknown): Record<string, string> | undefined =>
+  v && typeof v === 'object' ? (v as Record<string, string>) : undefined;
+const asString = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+
+/**
+ * 把 capture 脚本产出的原始 JSON 规范化为 `KiroClientProfile`。
+ *
+ * fixture 没有 `kas` 段 = V2 时代的旧 fixture:它描述的是另一套 wire,不能拿来半拼半凑,
+ * 直接报错让调用方回退到内置 V3 快照。
+ */
 function parseCaptured(raw: unknown): KiroClientProfile {
   if (!raw || typeof raw !== 'object') {
     throw new Error('profile JSON root is not an object');
   }
   const obj = raw as Record<string, unknown>;
-
-  const kiroCliVersion = typeof obj.kiroCliVersion === 'string' ? obj.kiroCliVersion : 'unknown';
-  const staticHeaders =
-    obj.staticHeaders && typeof obj.staticHeaders === 'object'
-      ? (obj.staticHeaders as Record<string, string>)
-      : FALLBACK_PROFILE.staticHeaders;
-  const userAgent = typeof obj.userAgent === 'string' ? obj.userAgent : FALLBACK_PROFILE.userAgent;
-  const xAmzUserAgent =
-    typeof obj.xAmzUserAgent === 'string' ? obj.xAmzUserAgent : FALLBACK_PROFILE.xAmzUserAgent;
-
-  const amzTargets: KiroClientProfile['amzTargets'] = { ...FALLBACK_PROFILE.amzTargets };
-  if (obj.amzTargets && typeof obj.amzTargets === 'object') {
-    for (const [k, v] of Object.entries(obj.amzTargets as Record<string, unknown>)) {
-      if (typeof v === 'string') {
-        (amzTargets as Record<string, string>)[k] = v;
-      }
-    }
+  if (!obj.kas || typeof obj.kas !== 'object') {
+    throw new Error(
+      'profile has no `kas` section (V2-era fixture); rerun scripts/capture-kiro-cli.sh',
+    );
   }
+  const kasRaw = obj.kas as Record<string, unknown>;
+  const shellRaw = (obj.shell && typeof obj.shell === 'object' ? obj.shell : {}) as Record<
+    string,
+    unknown
+  >;
+  const fb = FALLBACK_PROFILE;
 
-  const body = { ...FALLBACK_PROFILE.body };
-  if (obj.body && typeof obj.body === 'object') {
-    const b = obj.body as Record<string, unknown>;
-    if (typeof b.origin === 'string') body.origin = b.origin;
-    if (typeof b.agentTaskType === 'string') body.agentTaskType = b.agentTaskType;
-    if (typeof b.chatTriggerType === 'string') body.chatTriggerType = b.chatTriggerType;
-    if (b.envState && typeof b.envState === 'object') {
-      const es = b.envState as Record<string, unknown>;
-      if (typeof es.operatingSystem === 'string') {
-        body.envState = { ...body.envState, operatingSystem: es.operatingSystem };
-      }
-    }
+  const amzTargets: KasIdentity['amzTargets'] = { ...fb.kas.amzTargets };
+  for (const [k, v] of Object.entries(asStringRecord(kasRaw.amzTargets) ?? {})) {
+    if (typeof v === 'string') (amzTargets as Record<string, string>)[k] = v;
   }
+  const bodyRaw = (kasRaw.body && typeof kasRaw.body === 'object' ? kasRaw.body : {}) as Record<
+    string,
+    unknown
+  >;
 
   const profile: KiroClientProfile = {
     mode: 'kiro-cli',
-    kiroCliVersion,
-    staticHeaders,
-    userAgent,
-    xAmzUserAgent,
-    amzTargets,
-    body,
+    kiroCliVersion: asString(obj.kiroCliVersion) ?? 'unknown',
+    kas: {
+      staticHeaders: asStringRecord(kasRaw.staticHeaders) ?? fb.kas.staticHeaders,
+      mcpStaticHeaders: asStringRecord(kasRaw.mcpStaticHeaders) ?? fb.kas.mcpStaticHeaders,
+      userAgent: asString(kasRaw.userAgent) ?? fb.kas.userAgent,
+      xAmzUserAgent: asString(kasRaw.xAmzUserAgent) ?? fb.kas.xAmzUserAgent,
+      amzTargets,
+      body: {
+        origin: asString(bodyRaw.origin) ?? fb.kas.body.origin,
+        agentMode: asString(bodyRaw.agentMode) ?? fb.kas.body.agentMode,
+        // 一次 "ping" 抓不到 subagent,只能用内置实测值(fixture 可手工覆盖)
+        subagentAgentMode: asString(bodyRaw.subagentAgentMode) ?? fb.kas.body.subagentAgentMode,
+        agentTaskType: asString(bodyRaw.agentTaskType) ?? fb.kas.body.agentTaskType,
+        chatTriggerType: asString(bodyRaw.chatTriggerType) ?? fb.kas.body.chatTriggerType,
+      },
+    },
+    shell: {
+      staticHeaders: asStringRecord(shellRaw.staticHeaders) ?? fb.shell.staticHeaders,
+      userAgent: asString(shellRaw.userAgent) ?? fb.shell.userAgent,
+      xAmzUserAgent: asString(shellRaw.xAmzUserAgent) ?? fb.shell.xAmzUserAgent,
+      amzTargets: fb.shell.amzTargets,
+    },
   };
 
-  // 不管来源是 fixture 还是 fallback，统一把 os 归一化成 `{os}` 占位符，
-  // 这样 macOS 抓包出来的 fixture 部署到 Linux 也能工作。
+  // optout 是隐私硬约束,不管 fixture 写了什么都强制 'true'
+  for (const headers of [
+    profile.kas.staticHeaders,
+    profile.kas.mcpStaticHeaders,
+    profile.shell.staticHeaders,
+  ]) {
+    headers['x-amzn-codewhisperer-optout'] = 'true';
+  }
   return normalizeProfileOs(profile);
 }
 
@@ -292,30 +345,35 @@ export function reloadKiroClientProfile(): KiroClientProfile {
 }
 
 // ---------------------------------------------------------------------------
-// 便捷方法：按服务填 UA
+// 便捷方法:渲染 UA / 取 target
 // ---------------------------------------------------------------------------
 
-/** 把 `{service}` 和 `{os}` 占位替换成实际的 service id / 运行时平台 */
-export function renderUserAgent(profile: KiroClientProfile, service: KiroServiceId): string {
-  return renderPlaceholders(profile.userAgent, service);
+function renderPlaceholders(template: string): string {
+  return template
+    .replace('{jsOs}', JS_OS_TOKEN)
+    .replace('{os}', currentOsToken())
+    .replace('{service}', SHELL_SERVICE_ID);
 }
 
-export function renderXAmzUserAgent(profile: KiroClientProfile, service: KiroServiceId): string {
-  return renderPlaceholders(profile.xAmzUserAgent, service);
+export function renderKasUserAgent(profile: KiroClientProfile): string {
+  return renderPlaceholders(profile.kas.userAgent);
 }
 
-/** 把 body.envState.operatingSystem 里的 `{os}` 占位符也渲染成当前平台值 */
-export function renderOperatingSystem(profile: KiroClientProfile): string {
-  return profile.body.envState.operatingSystem.replace('{os}', currentOsToken());
+export function renderKasXAmzUserAgent(profile: KiroClientProfile): string {
+  return renderPlaceholders(profile.kas.xAmzUserAgent);
 }
 
-function renderPlaceholders(template: string, service: KiroServiceId): string {
-  return template.replace('{service}', service).replace('{os}', currentOsToken());
+export function renderShellUserAgent(profile: KiroClientProfile): string {
+  return renderPlaceholders(profile.shell.userAgent);
 }
 
-/** 按 target key 取出 x-amz-target 头值；未定义时抛错 */
-export function requireAmzTarget(profile: KiroClientProfile, key: KiroTargetKey): string {
-  const v = profile.amzTargets[key];
-  if (!v) throw new Error(`kiro-cli client profile missing amzTargets.${key}`);
+export function renderShellXAmzUserAgent(profile: KiroClientProfile): string {
+  return renderPlaceholders(profile.shell.xAmzUserAgent);
+}
+
+/** 按 target key 取出 KAS 的 x-amz-target 头值;未定义时抛错 */
+export function requireKasTarget(profile: KiroClientProfile, key: KasTargetKey): string {
+  const v = profile.kas.amzTargets[key];
+  if (!v) throw new Error(`kiro-cli client profile missing kas.amzTargets.${key}`);
   return v;
 }

@@ -121,7 +121,8 @@ describe('history thinking → reasoningContent', () => {
     const am = assistantAt(result, 1);
     expect(am.reasoningContent).toEqual({ reasoningText: { text: 'act', signature: 'sig-act' } });
     expect(am.toolUses?.map((t) => t.toolUseId)).toEqual(['toolu_1']);
-    expect(am.content).toBe(' ');
+    // 只有 tool_use 时同 KAS 发空串
+    expect(am.content).toBe('');
   });
 
   it('serialized wire shape: reasoningContent sits inside assistantResponseMessage, no discriminator', () => {

@@ -6,18 +6,20 @@
  * 由下游用 HTTP 标准客户端机制处理退避。两处例外：
  *   1. 上游 401 且响应体指示 bearer token 失效时，网关用本地 SQLite 凭据做
  *      一次 token force-refresh 后重试一次（下游没有 refresh token，无法自己
- *      处理）——这也是网关**唯一**会重试的路径。
+ *      处理）——executor 仅有的两条重试之一(另一条是签名失效剥离重发,见
+ *      `retry-executor.ts` 头注释)。
  *   2. 5xx 响应体点名容量不足时改判为 503 `overloaded_error`（不重试，只换
  *      标签；判据见 `provider-error.ts` 的 `matchModelCapacityReason`）。
- * 所有请求头统一走 kiro-cli client profile（Smithy awsJson1_0）。
+ * 所有请求头统一走 kiro-cli client profile 的 `kas` 身份(kiro-cli `chat --v3` 的 KAS 进程,
+ * Smithy awsJson1_0,target `KiroRuntimeService.*`,路径 `/`)。
  *
  * ## 架构
  *
  * 上游调用状态机统一在 `retry-executor.ts`。这里只做三件事：
  *   1. 为三个公共方法（callApi / callApiStream / callMcp）各自构造一个
  *      `RetryableRequest`，描述 URL/headers/body/axios 配置的差异。
- *   2. 构建 kiro-cli 伪装所需的请求头（单一源在 client-profile.ts）。
- *   3. 把 profileArn 注入到主 API 请求体（MCP 不需要）。
+ *   2. 构建模拟 kiro-cli 所需的请求头（单一源在 client-profile.ts）。
+ *   3. 把 profileArn 注入到请求体(GAR 与 InvokeMCP 都带,同 KAS)。
  */
 
 import https from 'node:https';
@@ -25,9 +27,9 @@ import axios, { type AxiosInstance, type AxiosResponse } from 'axios';
 
 import {
   getKiroClientProfile,
-  renderUserAgent,
-  renderXAmzUserAgent,
-  requireAmzTarget,
+  renderKasUserAgent,
+  renderKasXAmzUserAgent,
+  requireKasTarget,
 } from './client-profile.js';
 import type { KiroCredentials } from './model/credentials.js';
 import { credentialEffectiveApiRegion } from './model/credentials.js';
@@ -70,14 +72,12 @@ export class KiroProvider {
     this.executor = new RetryExecutor(tokenManager, this.client);
   }
 
-  /** 主 API 端点（按凭据 region 动态构造） */
-  private mainApiUrl(credentials: KiroCredentials): string {
-    return `https://runtime.${credentialEffectiveApiRegion(credentials, this.tokenManager.config())}.kiro.dev/generateAssistantResponse`;
-  }
-
-  /** MCP API 端点（按凭据 region 动态构造） */
-  private mcpApiUrl(credentials: KiroCredentials): string {
-    return `https://runtime.${credentialEffectiveApiRegion(credentials, this.tokenManager.config())}.kiro.dev/mcp`;
+  /**
+   * KAS 的 GAR 与 InvokeMCP 都 POST 到 runtime host 的根路径,操作由 `x-amz-target` 区分
+   * (Smithy awsJson1_0),不像 V2 那样走 `/generateAssistantResponse` / `/mcp`。
+   */
+  private runtimeUrl(credentials: KiroCredentials): string {
+    return `https://${this.buildHost(credentials)}/`;
   }
 
   /** host header（按凭据 region 动态构造） */
@@ -119,7 +119,7 @@ export class KiroProvider {
   /**
    * 发送流式 API 请求（响应体是 AsyncIterable<Buffer>）。`signal` 用于客户端断连时
    * 主动取消 in-flight 请求，让 Kiro 停止生成、停止计费（见
-   * `Config.abortUpstreamOnDisconnect`）。默认 undefined = 不可取消（现有行为）。
+   * `Config.abortUpstreamOnDisconnect`）。默认 undefined = 不可取消。
    */
   async callApiStream(requestBody: string, signal?: AbortSignal): Promise<AxiosResponse> {
     return this.executor.execute(this.buildMainApiRequest(requestBody, true, signal));
@@ -143,16 +143,16 @@ export class KiroProvider {
     return {
       label: isStream ? 'Stream' : 'Non-stream',
       body: requestBody,
-      buildUrl: (c) => this.mainApiUrl(c),
+      buildUrl: (c) => this.runtimeUrl(c),
       buildHost: (c) => this.buildHost(c),
-      buildHeaders: (_c, token, host) => buildGenerateAssistantResponseHeaders(token, host),
+      buildHeaders: (_c, token, host) => buildKasHeaders('generateAssistantResponse', token, host),
       transformBody: (body, credentials) =>
         KiroProvider.injectProfileArn(body, credentials.profileArn),
       axiosConfig: {
         responseType: isStream ? 'stream' : 'arraybuffer',
         // 客户端断连时主动取消 in-flight 请求（经 retry-executor 的 `...axiosConfig`
-        // 透传给 `client.post`）。`undefined` 被 axios 视为「无 signal」= 不可取消（现有
-        // 行为），故直接透传无需条件包裹。省 credit，见 Config.abortUpstreamOnDisconnect。
+        // 透传给 `client.post`）。`undefined` 被 axios 视为「无 signal」= 不可取消，
+        // 故直接透传无需条件包裹。省 credit，见 Config.abortUpstreamOnDisconnect。
         signal,
       },
       readErrorBody: isStream ? drainStreamBody : drainBufferBody,
@@ -164,10 +164,12 @@ export class KiroProvider {
     return {
       label: 'MCP',
       body: requestBody,
-      buildUrl: (c) => this.mcpApiUrl(c),
+      buildUrl: (c) => this.runtimeUrl(c),
       buildHost: (c) => this.buildHost(c),
-      buildHeaders: (credentials, token, host) => buildMcpHeaders(credentials, token, host),
-      transformBody: (body) => body,
+      buildHeaders: (_c, token, host) => buildKasHeaders('invokeMcp', token, host),
+      transformBody: (body, credentials) =>
+        KiroProvider.injectProfileArn(body, credentials.profileArn),
+      kiroAttemptHeader: false,
       axiosConfig: {
         // MCP 默认 JSON 响应；无 responseType 覆盖
       },
@@ -177,55 +179,37 @@ export class KiroProvider {
 }
 
 // ============================================================================
-// Header builders —— 统一走 kiro-cli client profile
+// Header builders —— 统一走 kiro-cli client profile 的 kas 身份
 // ============================================================================
 
 /**
- * 主 API (`GenerateAssistantResponse`) 的 headers 构造。
+ * KAS 不发 `accept` / `accept-encoding`;axios 会自动补这两个头,显式置 `false` 让它不发
+ * (AxiosHeaders 序列化时跳过 false 值,也不会被默认值覆盖)。
+ */
+const SUPPRESS_AXIOS_DEFAULTS = { accept: false, 'accept-encoding': false } as const;
+
+/**
+ * KAS 请求头:主 API(`GenerateAssistantResponse`)用 `staticHeaders`;MCP(`InvokeMCP`)用
+ * `mcpStaticHeaders`——KAS 不给 MCP 发 attribution 头,也不发 `x-amzn-kiro-profile-arn`
+ * (profileArn 在 body 里),重试头里不带 `x-kiro-attempt`(见 `buildMcpRequest` 的 `kiroAttemptHeader`)。
  *
  * ⚠ 重试三件套(`amz-sdk-invocation-id` / `amz-sdk-request` / `x-kiro-attempt`)
  * **不在这里**——它们由 `RetryExecutor` 统一注入,因为只有它知道当前是第几次
  * attempt。见 `applyRetryHeaders`。
  */
-function buildGenerateAssistantResponseHeaders(
+function buildKasHeaders(
+  operation: 'generateAssistantResponse' | 'invokeMcp',
   token: string,
   host: string,
-): Record<string, string> {
+): Record<string, string | false> {
   const profile = getKiroClientProfile();
   return {
-    ...profile.staticHeaders,
-    'x-amz-target': requireAmzTarget(profile, 'generateAssistantResponse'),
-    'user-agent': renderUserAgent(profile, 'codewhispererstreaming'),
-    'x-amz-user-agent': renderXAmzUserAgent(profile, 'codewhispererstreaming'),
+    ...SUPPRESS_AXIOS_DEFAULTS,
+    ...(operation === 'invokeMcp' ? profile.kas.mcpStaticHeaders : profile.kas.staticHeaders),
+    'x-amz-target': requireKasTarget(profile, operation),
+    'user-agent': renderKasUserAgent(profile),
+    'x-amz-user-agent': renderKasXAmzUserAgent(profile),
     host,
     Authorization: `Bearer ${token}`,
   };
-}
-
-/**
- * MCP (`InvokeMCP`) 的 headers 构造。
- *
- * 即使主 API 不带 `x-amzn-kiro-profile-arn`，这里必须带——kiro-cli 二进制里的
- * `invoke_mcp.rs` 明确写了这个头，上游也依赖它。
- */
-function buildMcpHeaders(
-  credentials: KiroCredentials,
-  token: string,
-  host: string,
-): Record<string, string> {
-  const profile = getKiroClientProfile();
-  // 重试三件套同样交给 RetryExecutor 注入（见 buildGenerateAssistantResponseHeaders）。
-  const headers: Record<string, string> = {
-    ...profile.staticHeaders,
-    'x-amz-target': requireAmzTarget(profile, 'invokeMcp'),
-    'user-agent': renderUserAgent(profile, 'codewhispererstreaming'),
-    'x-amz-user-agent': renderXAmzUserAgent(profile, 'codewhispererstreaming'),
-    host,
-    Authorization: `Bearer ${token}`,
-  };
-
-  if (credentials.profileArn) {
-    headers['x-amzn-kiro-profile-arn'] = credentials.profileArn;
-  }
-  return headers;
 }

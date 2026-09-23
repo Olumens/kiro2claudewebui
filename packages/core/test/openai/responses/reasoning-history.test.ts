@@ -72,7 +72,6 @@ describe('Responses plaintext reasoning history', () => {
         toolUseId: 'read_1',
         content: [{ text: 'Exact file output.\n' }],
         status: 'success',
-        isError: false,
       },
     ]);
   });

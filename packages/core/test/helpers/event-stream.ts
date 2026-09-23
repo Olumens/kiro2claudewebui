@@ -136,8 +136,8 @@ export function buildReasoningContentFrame(text: string, signature?: string): Bu
 /**
  * Build a GPT-5.6 redacted reasoning frame: same `reasoningContentEvent`
  * event-type but the payload is `{ redactedContent }` only (no text/signature) —
- * an encrypted hidden chain-of-thought with nothing surfaceable. Used to assert
- * the stream/non-stream paths drop it instead of opening an empty thinking block.
+ * an encrypted hidden chain-of-thought with nothing surfaceable. It must never open
+ * a thinking block; it only travels back to the client inside a reasoning envelope.
  */
 export function buildRedactedReasoningFrame(redactedContent = 'LktUUn5+ZW5j'): Buffer {
   return encodeEventStreamFrame(
@@ -219,4 +219,12 @@ export function parseSseEvents(body: string): SseEvent[] {
     }
   }
   return events;
+}
+
+/**
+ * 去掉 body 里所有网关推理信封(`"k2c.r2.…"` 字符串字面量)。GPT 推理只能随信封下发:
+ * 剥掉信封后仍能找到的推理内容 = 泄漏到了信封之外。
+ */
+export function withoutReasoningEnvelopes(body: string): string {
+  return body.replace(/"k2c\.r2\.(?:[^"\\]|\\.)*"/g, '""');
 }

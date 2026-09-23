@@ -2,7 +2,7 @@
  * Responses API 流式 handler(薄封装)。
  *
  * 传输编排全在共享的 `runOpenAiStream`;这里注入 responses 协议:
- * ResponsesEventEncoder + 终止行 `encoder.finalize(usage)` → `response.completed`
+ * ResponsesEventEncoder + 终止行 `encoder.finalize(usage, opaqueReasoning)` → `response.completed`
  * (Responses 流以 response.completed 收口,无 `[DONE]` 哨兵)。
  */
 
@@ -44,7 +44,7 @@ export async function handleResponsesStreamRequest(
           ctx.outputTokens,
           resolvePluginUsageExtensions(ctx.usageFinishEvent),
         ),
-        ctx.redactedReasoning,
+        ctx.opaqueReasoning,
       ),
     inbandError: (encoder, message, type) => [encoder.errorLine(message, type)],
   };

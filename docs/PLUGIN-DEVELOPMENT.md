@@ -139,7 +139,9 @@ event.overrideStandardField('input_tokens', 1234, 'reason for override');
 
 `event.source` 标识网关路径,当前恒为:
 
-- `'http-direct'` —— `/claude/v1/messages` 直发路径
+- `'http-direct'` —— HTTP 直发路径(Claude 与 OpenAI 两个协议的端点都是)
+
+OpenAI 端点只并入 `addExtension` 的扩展,不套 `overrideStandardField`(`prompt_tokens` 语义是输入总量);`/api/*` 去泄漏镜像照常触发 hook,但扩展字段不上 wire。
 
 `event.inputTokensSource` 报告输入 token 的可靠性:
 

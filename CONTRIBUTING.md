@@ -9,11 +9,11 @@ kiro2claude 是一个 **MIT 开源**项目,本仓库就是主开发仓——直�
 - `packages/plugin-metering/` —— 随镜像默认启用的计量插件(注入 `usage.kiro_metering`)
 - `packages/plugin-derived/` —— 随镜像默认启用的 credit 反演插件(注入 `usage.kiro_derived`)
 - `packages/examples/echo-plugin/` —— 最小插件示范
-- `tools/claude-code/` —— Claude Code 兼容性测试 harness(Docker,非 runtime)
+- `tools/claude-code/` `tools/codex/` —— Claude Code / Codex CLI 兼容性测试 harness(Docker,非 runtime)
 - `docs/PLUGIN-DEVELOPMENT.md` —— 插件开发指南
 - `docker/Dockerfile` —— 发布镜像构建(CI 推 ghcr.io)
 
-全部以 [MIT](./LICENSE) 许可证发布,可商用,使用时保留版权与许可声明即可。core 网关不依赖任何私有组件即可独立运行,且符合标准 Anthropic API。
+全部以 [MIT](./LICENSE) 许可证发布,可商用,使用时保留版权与许可声明即可。core 网关不依赖任何私有组件即可独立运行,且符合标准 Anthropic / OpenAI API。
 
 ## 怎么贡献
 
@@ -23,8 +23,8 @@ kiro2claude 是一个 **MIT 开源**项目,本仓库就是主开发仓——直�
 
 ### Pull Request
 
-1. fork + 从 `main` / `master` 建分支
-2. 改动,并确保 `pnpm run check`、`pnpm -r typecheck`、`pnpm -r test` 全绿(pre-commit 钩子也会强制这三道)
+1. fork + 从 `master` 建分支
+2. 改动,并确保 `pnpm run check`、`pnpm -r typecheck`、`pnpm -r test`、`pnpm run lint:md` 全绿(pre-commit 钩子也会强制这四道)
 3. 提 PR;CI(`.github/workflows/ci.yml`)会在全 workspace 跑 lint + typecheck + test
 4. 维护者审阅、合并
 
@@ -48,11 +48,11 @@ fix(kiro): 修复 token 到期刷新写回 SQLite
 docs: 补充 plugin 加载顺序说明
 ```
 
-`pnpm install` 后会自动启用 `.gitmessage` 模板(执行 `git commit` 不带 `-m` 时弹出引导)。
+仓库根的 `.gitmessage` 是提交模板,`git config commit.template .gitmessage` 启用后,执行 `git commit` 不带 `-m` 时弹出引导。
 
 ### 篇幅
 
-commitlint 只卡标题 120 字符,正文长度靠惯例——仓库历史正文中位数 **6 行**,最长 13 行。
+commitlint 只卡标题 120 字符,正文长度靠惯例。
 
 - **正文可选,写就控制在 8 行内**。写不下说明该拆提交。
 - 只答「为什么这么改」「不这么改会怎样」。**不复述 diff**:改了哪些文件、加了哪些函数,`git show` 自己会说。
@@ -72,7 +72,7 @@ commitlint 只卡标题 120 字符,正文长度靠惯例——仓库历史正文
 | `在 /Users/alice/repo 跑 node packages/core/dist/index.js` | `本地跑构建产物入口` |
 | `打到 runtime.us-east-1.example.com 就 502` | `打到上游 streaming endpoint 就 502` |
 
-现成参照是 `fixtures/kiro-cli-profile.json`:`profileArn` 落成 `000000000000:profile/REDACTED`、`clientId` 落成全零 UUID。
+现成参照是 `fixtures/kiro-cli-profile.json`:`profileArn` 落成 `000000000000:profile/REDACTED`、`conversationId` 等会话 id 落成全零 UUID。
 
 ## 版本与发布
 
@@ -104,7 +104,7 @@ pnpm run check          # biome lint + format(不写盘)
 pnpm run lint:md        # markdown 样式
 ```
 
-`pnpm dev` 启动 core 网关并热重载。不装任何插件时只服务 `/claude/v1/*`——这就是裸默认形态。
+`pnpm dev` 启动 core 网关并热重载。不装任何插件时 README「HTTP 路由」里的接口照常可用,只是 `usage` 里没有插件扩展字段。
 
 ## 许可证
 

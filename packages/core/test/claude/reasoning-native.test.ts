@@ -16,12 +16,14 @@ import { describe, expect, it } from 'vitest';
 import {
   clientModelHasEncryptedReasoning,
   convertRequest,
+  effectiveThinking,
   getContextWindowSize,
   initGptContextWindow,
   MODELS_WITH_NATIVE_REASONING,
   mapModel,
   resolveContextUsage,
   resolveEffort,
+  responseThinkingEnabled,
   toKiroRequest,
   usesNativeReasoning,
 } from '../../src/claude/converter.js';
@@ -139,7 +141,7 @@ describe('parser: reasoningContentEvent', () => {
 });
 
 // ============================================================================
-// stream: GPT redacted reasoning 整块丢弃(不开空 thinking 块)
+// stream: redacted reasoning 帧不产可见输出(不开空 thinking 块;GPT 回传见 opaque-gpt-reasoning.test.ts)
 // ============================================================================
 
 describe('stream: GPT redacted reasoning', () => {
@@ -202,30 +204,56 @@ describe('stream: GPT redacted reasoning', () => {
 // converter: thinking → effort(只有 adaptive 一种语义)
 // ============================================================================
 
-describe('resolveEffort: 只有 adaptive 一种语义', () => {
-  it('adaptive + output_config.effort 直接同步', () => {
+describe('resolveEffort: adaptive 的档位', () => {
+  it('output_config.effort 直接同步', () => {
     for (const e of ['low', 'medium', 'high', 'xhigh', 'max'] as const) {
-      expect(resolveEffort({ type: 'adaptive' }, { effort: e })).toBe(e);
+      expect(resolveEffort({ effort: e })).toBe(e);
     }
   });
 
-  it('adaptive 无 effort / 未知 effort 落到默认 high', () => {
-    expect(resolveEffort({ type: 'adaptive' }, undefined)).toBe('high');
-    expect(resolveEffort({ type: 'adaptive' }, {})).toBe('high');
-    expect(resolveEffort({ type: 'adaptive' }, { effort: 'mega' })).toBe('high');
+  it('无 effort / 未知 effort 落到模型默认(opus-4.7 为 xhigh,其余 high)', () => {
+    expect(resolveEffort(undefined)).toBe('high');
+    expect(resolveEffort({})).toBe('high');
+    expect(resolveEffort({ effort: 'mega' })).toBe('high');
+    expect(resolveEffort(undefined, 'claude-opus-4.7')).toBe('xhigh');
   });
 
   it('客户端的 enabled 在入口归一成 adaptive(budget_tokens 丢弃),下游只见 adaptive', () => {
     expect(normalizeThinking({ type: 'enabled', budget_tokens: 100000 })).toEqual({
       type: 'adaptive',
     });
-    expect(resolveEffort(normalizeThinking({ type: 'enabled' }), { effort: 'low' })).toBe('low');
-    expect(resolveEffort(normalizeThinking({ type: 'enabled' }), undefined)).toBe('high');
+  });
+});
+
+describe('effectiveThinking / responseThinkingEnabled: 上游字段与响应侧同源', () => {
+  it('原生模型未提 thinking → adaptive(同 KAS 默认);disabled 原样', () => {
+    expect(effectiveThinking(undefined, 'claude-opus-5')).toEqual({ type: 'adaptive' });
+    expect(effectiveThinking({ type: 'disabled' }, 'claude-opus-5')).toEqual({ type: 'disabled' });
   });
 
-  it('disabled / 未提 → undefined', () => {
-    expect(resolveEffort({ type: 'disabled' }, { effort: 'max' })).toBeUndefined();
-    expect(resolveEffort(undefined, undefined)).toBeUndefined();
+  it('thinking 常开的 fable-5.1:disabled 也按 adaptive(上游照样思考)', () => {
+    expect(effectiveThinking({ type: 'disabled' }, 'claude-fable-5.1')?.type).toBe('adaptive');
+    expect(effectiveThinking(undefined, 'claude-fable-5.1')?.type).toBe('adaptive');
+  });
+
+  it('非原生模型不做 thinking 控制,原样返回', () => {
+    expect(effectiveThinking(undefined, 'claude-opus-4.6')).toBeUndefined();
+    expect(effectiveThinking({ type: 'adaptive' }, 'claude-opus-4.6')).toEqual({
+      type: 'adaptive',
+    });
+  });
+
+  it('响应侧 thinking 通道:未提 thinking 的原生 Claude 必须开(否则 text block 抢在 thinking 前)', () => {
+    expect(responseThinkingEnabled(undefined, 'claude-opus-5')).toBe(true);
+    expect(responseThinkingEnabled({ type: 'disabled' }, 'claude-opus-5')).toBe(false);
+    expect(responseThinkingEnabled({ type: 'disabled' }, 'claude-fable-5-1')).toBe(true);
+    expect(responseThinkingEnabled(undefined, 'claude-opus-4-6')).toBe(false);
+    expect(responseThinkingEnabled({ type: 'adaptive' }, 'claude-opus-4-6')).toBe(true);
+  });
+
+  it('GPT 推理不透明、不走 thinking 通道,恒 false', () => {
+    expect(responseThinkingEnabled(undefined, 'gpt-5.6-sol')).toBe(false);
+    expect(responseThinkingEnabled({ type: 'adaptive' }, 'gpt-5-codex')).toBe(false);
   });
 });
 
@@ -291,7 +319,7 @@ describe('usesNativeReasoning: 模型能力探测', () => {
 
 describe('clientModelHasEncryptedReasoning: 仅 GPT(加密 reasoning)命中', () => {
   it('GPT 客户端名(含 Codex 别名 gpt-*-codex)→ true', () => {
-    // handler 侧据此从响应开始就关掉 legacy 解码；即使 redacted event 缺失/晚到，
+    // handler 侧据此从响应开始就关掉 legacy 解码；即使推理帧缺失/晚到，
     // 字面 <thinking> 也不会被暂存或误解。
     expect(clientModelHasEncryptedReasoning('gpt-5.6-sol')).toBe(true);
     // Codex 用 gpt-5-codex,mapModel 别名到 gpt-5.6-sol —— 未映射名也须命中
@@ -334,14 +362,14 @@ describe('convertRequest: 顶层 additionalModelRequestFields(effort 唯一生�
     expect(mapModel(req.model)).toBe('claude-opus-4.7');
   });
 
-  it('4.7 + 客户端 enabled(入口归一为 adaptive)→ 上 wire 是 adaptive,effort 取 output_config 或默认 high', () => {
+  it('4.7 + 客户端 enabled(入口归一为 adaptive)→ 上 wire 是 adaptive,effort 取 output_config 或模型默认(4.7 为 xhigh)', () => {
     const noEffort = baseMessagesRequest({
       model: 'claude-opus-4-7',
       thinking: normalizeThinking({ type: 'enabled', budget_tokens: 4096 }),
     });
     expect(convertRequest(noEffort).additionalModelRequestFields).toEqual({
       thinking: { type: 'adaptive' },
-      output_config: { effort: 'high' },
+      output_config: { effort: 'xhigh' },
     });
     const withEffort = baseMessagesRequest({
       model: 'claude-opus-4-7',
@@ -398,10 +426,27 @@ describe('convertRequest: 顶层 additionalModelRequestFields(effort 唯一生�
     });
   });
 
-  it('4.7 不传 thinking → 不发顶层字段(沿用上游默认,行为不变)', () => {
-    const result = convertRequest(baseMessagesRequest({ model: 'claude-opus-4-7' }));
-    expect(result.additionalModelRequestFields).toBeUndefined();
-    expect(uim(result).reasoning).toBeUndefined();
+  it('不传 thinking → 同 KAS 补模型 schema 默认(adaptive + 默认档位);非原生与 fable-5.1 不发', () => {
+    const opus47 = convertRequest(baseMessagesRequest({ model: 'claude-opus-4-7' }));
+    expect(opus47.additionalModelRequestFields).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'xhigh' },
+    });
+    expect(uim(opus47).reasoning).toBeUndefined();
+    expect(
+      convertRequest(baseMessagesRequest({ model: 'claude-opus-5' })).additionalModelRequestFields,
+    ).toEqual({ thinking: { type: 'adaptive' }, output_config: { effort: 'high' } });
+    expect(
+      convertRequest(baseMessagesRequest({ model: 'gpt-5.6-sol' })).additionalModelRequestFields,
+    ).toEqual({ reasoning: { effort: 'high' } });
+    expect(
+      convertRequest(baseMessagesRequest({ model: 'claude-opus-4-6' }))
+        .additionalModelRequestFields,
+    ).toBeUndefined();
+    expect(
+      convertRequest(baseMessagesRequest({ model: 'claude-fable-5-1' }))
+        .additionalModelRequestFields,
+    ).toBeUndefined();
   });
 
   it('4.7 + thinking.type=disabled → {thinking:{type:disabled}}(真关,不是不发)', () => {
@@ -432,18 +477,22 @@ describe('convertRequest: 顶层 additionalModelRequestFields(effort 唯一生�
   it('toKiroRequest + serializeKiroRequest:字段落在 wire 顶层,与 conversationState 平级', () => {
     const req = baseMessagesRequest({ model: 'claude-opus-5', ...adaptive('low') });
     const wire = JSON.parse(serializeKiroRequest(toKiroRequest(convertRequest(req))));
-    expect(Object.keys(wire).sort()).toEqual(['additionalModelRequestFields', 'conversationState']);
+    expect(Object.keys(wire).sort()).toEqual([
+      'additionalModelRequestFields',
+      'agentMode',
+      'conversationState',
+    ]);
     expect(wire.additionalModelRequestFields).toEqual({
       thinking: { type: 'adaptive' },
       output_config: { effort: 'low' },
     });
-    // 非原生模型 / 未提 thinking:顶层不多出一个 undefined 键
+    // 非原生模型:顶层不多出一个 undefined 的 additionalModelRequestFields 键
     const plain = JSON.parse(
       serializeKiroRequest(
         toKiroRequest(convertRequest(baseMessagesRequest({ model: 'claude-opus-4-6' }))),
       ),
     );
-    expect(Object.keys(plain)).toEqual(['conversationState']);
+    expect(Object.keys(plain)).toEqual(['conversationState', 'agentMode']);
   });
 
   it('4.6 + thinking → 不注入任何前缀、不发顶层字段(旧模型用上游默认)', () => {

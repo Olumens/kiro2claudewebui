@@ -10,15 +10,15 @@ import {
   type ClientSession,
   ConversionError,
   type ConversionResult,
-  clientModelHasEncryptedReasoning,
   convertRequest,
+  responseThinkingEnabled,
   toKiroRequest,
 } from '../../claude/converter.js';
 import { captureEmptyRequest, type MessageHandlerResult } from '../../claude/empty-capture.js';
 import type { PostMessagesDeps } from '../../claude/handlers.js';
+import { wantsEncryptedReasoning } from '../../claude/reasoning-envelope.js';
 import { buildToolTextRegistry } from '../../claude/tool-call-text.js';
 import type { MessagesRequest } from '../../claude/types.js';
-import { isThinkingEnabled } from '../../claude/types.js';
 import { serializeKiroRequest } from '../../kiro/model/requests/kiro.js';
 import { getLogger } from '../../shared/logger.js';
 import { getRequestContext } from '../../shared/request-context.js';
@@ -30,7 +30,6 @@ import {
   type ResponsesToolCodec,
 } from './converter.js';
 import { handleResponsesNonStreamRequest } from './non-stream-handler.js';
-import { wantsEncryptedReasoning } from './reasoning-envelope.js';
 import { handleResponsesStreamRequest } from './stream-handler.js';
 import type { ResponsesRequest } from './types.js';
 
@@ -38,9 +37,9 @@ import type { ResponsesRequest } from './types.js';
  * Codex 线程 → kiro-cli 会话(形态见 `resolveConversationIdentity`)。
  *
  * Codex 的 subagent 与父线程共用 `prompt_cache_key`(根 session id),线程身份只在 `thread-id`
- * 头里:根线程的 `thread-id` 等于 key,子线程各有自己的(0.156.1 实测)。kiro-cli 的 subagent
- * 是独立会话——自己的 conversationId、不带 agentContinuationId——所以 `thread-id` 与 key 不同
- * 的请求按 subagent 会话映射。根线程只看 key,与 Chat 端点派生出同一个 id。没有 key 时不单凭
+ * 头里:根线程的 `thread-id` 等于 key,子线程各有自己的(0.156.1 实测)。KAS 的 subagent 是
+ * 独立会话——自己的 conversationId、`rootConversationId` 指向父会话、顶层 `agentMode` 换成子
+ * agent 的——所以 `thread-id` 与 key 不同的请求按 subagent 会话映射。根线程只看 key,与 Chat 端点派生出同一个 id。没有 key 时不单凭
  * `thread-id` 认会话:那是 Codex 私有头,不是协议里的会话声明。
  */
 export function responsesSession(
@@ -49,9 +48,9 @@ export function responsesSession(
 ): ClientSession | undefined {
   if (typeof promptCacheKey !== 'string' || !promptCacheKey) return undefined;
   if (typeof threadId === 'string' && threadId && threadId !== promptCacheKey) {
-    return { key: `${promptCacheKey}\nthread:${threadId}`, subagent: true };
+    return { key: `${promptCacheKey}\nthread:${threadId}`, rootKey: promptCacheKey };
   }
-  return { key: promptCacheKey, subagent: false };
+  return { key: promptCacheKey };
 }
 
 export function createPostResponses(deps: PostMessagesDeps) {
@@ -102,7 +101,7 @@ export function createPostResponses(deps: PostMessagesDeps) {
       namespaced_tool_count: codec.toolNamespaces.size,
       reasoning_effort: oaiReq.reasoning?.effort,
       has_session_key: session !== undefined,
-      ...(session?.subagent ? { subagent_thread: true } : {}),
+      ...(session?.rootKey !== undefined ? { subagent_thread: true } : {}),
       reasoning_replayed: reasoningReplay.replayed,
       ...(Object.values(reasoningReplay.dropped).some((n) => n > 0)
         ? { reasoning_dropped: reasoningReplay.dropped }
@@ -154,13 +153,8 @@ export function createPostResponses(deps: PostMessagesDeps) {
       payload.messages,
       payload.tools,
     );
-    // 仅 GPT(加密 reasoning)从响应开始就关掉 legacy `<thinking>` 解码；运行时 native
-    // event 也会锁模式，但静态判定还能覆盖 redacted event 缺失/晚到，避免误解 GPT
-    // 可见输出里的字面标签。Claude 原生 reasoning(明文)不纳入(见 converter.ts)。
     const extractThinking =
-      deps.extractThinking &&
-      isThinkingEnabled(payload.thinking) &&
-      !clientModelHasEncryptedReasoning(payload.model);
+      deps.extractThinking && responseThinkingEnabled(payload.thinking, payload.model);
     const toolNameMap = conversionResult.toolNameMap;
     // 推理往返只在客户端声明 include 时开(OpenAI 语义:不声明就不下发 encrypted_content)。
     const reasoningModelId = wantsEncryptedReasoning(oaiReq.include)

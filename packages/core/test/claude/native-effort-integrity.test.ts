@@ -7,10 +7,13 @@ import { HookBus } from '../../src/plugin-host/index.js';
 import { registerClaudeRoutes } from '../../src/routes/claude.js';
 import { registerOpenAiRoutes } from '../../src/routes/openai.js';
 import {
+  buildAssistantResponseFrame,
   buildMeteringFrame,
   buildReasoningContentFrame,
   buildRedactedReasoningFrame,
+  completedFrames,
   encodeEventStreamFrame,
+  parseSseEvents,
 } from '../helpers/event-stream.js';
 
 const levels = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -108,6 +111,73 @@ describe.each(protocols)('%s native effort and reasoning failure boundaries', (p
       expect(res.body).not.toContain('"id":"invalid"');
       expect(callApiStream).toHaveBeenCalledTimes(1);
       expect(credits).toEqual([0.03]);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe('claude native model with thinking omitted', () => {
+  // 未提 thinking 时上游按 KAS 默认走 adaptive;响应侧必须同样开 thinking 通道,
+  // 否则会先开一个空 text block,thinking 被挤到其后(content[0] 不再是正文)。
+  it.each([
+    true,
+    false,
+  ])('stream=%s: upstream gets adaptive, thinking block comes first', async (stream) => {
+    const callApiStream = vi.fn(async (requestBody: string) => {
+      expect(JSON.parse(requestBody).additionalModelRequestFields).toEqual({
+        thinking: { type: 'adaptive' },
+        output_config: { effort: 'high' },
+      });
+      const data = (async function* () {
+        for (const frame of completedFrames(
+          buildReasoningContentFrame('native reasoning', 'native-signature'),
+          buildAssistantResponseFrame('answer'),
+        ))
+          yield frame;
+      })();
+      return { data, status: 200, headers: {} } as AxiosResponse;
+    });
+    const app = Fastify({ logger: false });
+    await app.register(
+      (instance) =>
+        registerClaudeRoutes(instance, {
+          apiKey: 'test-key',
+          kiroProvider: {
+            callApiStream,
+            callApi: async (body: string) => {
+              const res = await callApiStream(body);
+              const chunks: Buffer[] = [];
+              for await (const c of res.data as AsyncIterable<Buffer>) chunks.push(c);
+              return { ...res, data: Buffer.concat(chunks) };
+            },
+          } as unknown as KiroProvider,
+          extractThinking: true,
+          identityOverride: false,
+          emptyStreamRetries: 2,
+          hookBus: new HookBus(),
+        }),
+      { prefix: '/claude/v1' },
+    );
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/claude/v1/messages',
+        headers: { 'x-api-key': 'test-key' },
+        payload: {
+          model: 'claude-opus-5',
+          max_tokens: 4096,
+          stream,
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const types = stream
+        ? parseSseEvents(res.body)
+            .filter((e) => e.event === 'content_block_start')
+            .map((e) => (e.data as { content_block: { type: string } }).content_block.type)
+        : (res.json() as { content: { type: string }[] }).content.map((b) => b.type);
+      expect(types).toEqual(['thinking', 'text']);
     } finally {
       await app.close();
     }

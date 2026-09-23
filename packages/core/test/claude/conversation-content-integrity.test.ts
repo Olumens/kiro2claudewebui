@@ -20,6 +20,7 @@ import {
   buildReasoningContentFrame,
   buildRedactedReasoningFrame,
   buildToolUseFrame,
+  withoutReasoningEnvelopes,
 } from '../helpers/event-stream.js';
 
 const options = { identityOverride: false };
@@ -338,7 +339,9 @@ describe.each([
     const { send } = await setup([
       [buildReasoningContentFrame('ONLY_UNFINISHED_THINKING', 'test-signature')],
     ]);
-    const model = name === 'Claude' ? 'claude-opus-4-6' : 'gpt-5.6-sol';
+    // 明文推理是 Claude 的语义;GPT 的推理在 V3 下不透明,「只有 GPT 推理」按空流处理
+    // (见 empty-response-contract 的「encrypted reasoning only」)。
+    const model = 'claude-opus-4-6';
     const noThinkingRequest = await send(true, model);
     expect(noThinkingRequest.body).toContain(
       name === 'Claude' ? '"stop_reason":"max_tokens"' : 'response.incomplete',
@@ -357,7 +360,7 @@ describe.each([
     );
   });
 
-  it('GPT encrypted reasoning is discarded even when the visible answer succeeds', async () => {
+  it('GPT opaque reasoning never surfaces outside its envelope', async () => {
     const { send } = await setup([
       [
         buildRedactedReasoningFrame('OPAQUE_REASONING_CANARY'),
@@ -367,7 +370,7 @@ describe.each([
     const res = await send(true, 'gpt-5.6-sol');
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('VISIBLE_ANSWER_CANARY');
-    expect(res.body).not.toContain('OPAQUE_REASONING_CANARY');
+    expect(withoutReasoningEnvelopes(res.body)).not.toContain('OPAQUE_REASONING_CANARY');
   });
 
   it('freezes generated content at the first corrupt frame instead of joining text around missing bytes', async () => {

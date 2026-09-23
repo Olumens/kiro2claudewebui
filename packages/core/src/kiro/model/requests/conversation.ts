@@ -8,6 +8,8 @@ export interface ConversationState {
   chatTriggerType?: string;
   currentMessage: CurrentMessage;
   conversationId: string;
+  /** KAS:主会话等于自己的 conversationId,subagent 会话指向父会话 */
+  rootConversationId?: string;
   history: Message[];
 }
 
@@ -41,10 +43,8 @@ export interface UserInputMessage {
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 // 工厂只铺结构占位：`content`、`modelId`、`images`、空 `userInputMessageContext`。
-// 语义字段（`origin`、`envState`）全部由 converter 层在每次请求处理时注入——
-// `origin` 来自 client-profile、`envState` 依赖 runtime 的 process.cwd()，
-// 都不是工厂层能或应该决定的。converter 是 origin 的单一写入点，避免工厂
-// 硬编码的默认值和 client-profile 漂移。
+// 语义字段 `origin` 由 converter 层从 client-profile 注入——converter 是 origin 的单一
+// 写入点，避免工厂硬编码的默认值和 client-profile 漂移。
 function defaultUserInputMessage(): UserInputMessage {
   return {
     userInputMessageContext: { toolResults: [], tools: [] },
@@ -62,19 +62,13 @@ export function createUserInputMessage(content: string, modelId: string): UserIn
   };
 }
 
-/** 用户输入消息上下文 */
+/**
+ * 用户输入消息上下文。空集合由 `serializeKiroRequest` 从 wire 上省略(同 KAS:没有工具结果的
+ * 历史消息整个不带 context)。KAS 不发 `envState`。
+ */
 export interface UserInputMessageContext {
   toolResults: ToolResult[];
   tools: Tool[];
-  /**
-   * 环境状态，与 kiro-cli 实测的 payload 一致。
-   * 不加这个字段上游也能工作，但客户端画像会偏离 kiro-cli；
-   * 加上后 `operatingSystem` + `currentWorkingDirectory` 在两端都有。
-   */
-  envState?: {
-    operatingSystem?: string;
-    currentWorkingDirectory?: string;
-  };
 }
 
 /** Kiro 图片 */
@@ -117,7 +111,8 @@ export function createUserMessage(content: string, modelId: string): UserMessage
 /**
  * history 里 assistant 上一轮推理的 wire 形态,与 Anthropic 的 `thinking` / `redacted_thinking`
  * 块一一对应:Claude `{reasoningText:{text, signature}}`——signature 必填且须有效,否则上游
- * 400 `THINKING_SIGNATURE_INVALID`;GPT `{redactedContent}`。不拼成 `<thinking>` 文本混进
+ * 400 `THINKING_SIGNATURE_INVALID`;GPT 也是 `{reasoningText}`(文本为占位 `...`),
+ * `{redactedContent}`(V2 下 GPT 的形态)上游也收。不拼成 `<thinking>` 文本混进
  * `content`。签名失效由 `RetryExecutor` 剥掉重发一次(`stripReasoningContent`)。
  */
 export type ReasoningContent =
@@ -130,39 +125,10 @@ export interface AssistantMessage {
   toolUses?: ToolUseEntry[];
   /** 上一轮推理的原生回传,形态与红线见 {@link ReasoningContent}。 */
   reasoningContent?: ReasoningContent;
-  /**
-   * 客户端生成的 UUID v4。kiro-cli 实测只在带 `toolUses` 的 assistant 消息上出现(新版也见于只有
-   * `reasoningContent` 的那条),流里没有该字段它照样生成,是本地产的。用途看着是遥测关联,网关
-   * 不发遥测、功能上不依赖它——补它只为伪装画像不漏字段。本项目只在带 toolUses 时补
-   * (`attachToolUses`),上游两种都收。
-   *
-   * ★ 每条消息一个,不是每次请求一个:kiro-cli 收到消息时铸一次、随历史持久化,同一条消息的
-   * messageId 在后续所有请求里恒定。故本项目必须确定性派生,见 `deriveMessageId`。
-   */
-  messageId?: string;
 }
 
 export function createAssistantMessage(content: string): AssistantMessage {
   return { content };
-}
-
-/**
- * 从 `toolUseId` 确定性派生一个 UUID v4 **形状**的 messageId。
- *
- * ★ 为什么不能用 `uuidv4()`:网关每收到一个请求就把整段历史重新转换一次,随机 id
- * 会让**历史前缀的字节**每轮都变。上游的缓存红利正是按相同 prefix / session 给的
- * (踩坑「core 不发 cachePoint」),于是从第一次工具调用起,越长的 agentic 会话越
- * 稳定地丢缓存——为一个功能上根本不被使用的字段付真金白银。
- *
- * kiro-cli 那边是**每条消息铸一次并随历史持久化**(2.21.1 探针实测:同一条消息的
- * messageId 在 246 轮请求里恒定),所以「稳定」才是忠于原形态的做法,不是取巧。
- *
- * 种子取 `toolUses[0].toolUseId`:它由上游生成、经客户端原样回传,在同一条消息上
- * 天然稳定且跨消息唯一——正好是「消息身份」的现成载体。加前缀是防止这个派生值与
- * 别处可能出现的裸 hash 撞用途。
- */
-function deriveMessageId(seed: string): string {
-  return deriveUuidV4Shape('messageId', seed);
 }
 
 /**
@@ -171,23 +137,37 @@ function deriveMessageId(seed: string): string {
  *
  * ★ 为什么不能每请求 `uuidv4()`:上游的缓存折扣按 conversationId 给。2026-09 用 Codex
  * 实测同一任务:随机 id 每轮都按冷价计(约 0.08 credit/1K input),稳定 id 从第二轮起降到
- * 约 1/5,整段会话省约 70%。kiro-cli(V2 / V3)整个会话都用同一个 id。
+ * 约 1/5,整段会话省约 70%。kiro-cli 整个会话都用同一个 id(V3 形如 `sess_<uuid>`)。
  *
  * 会话隔离靠键本身:不同会话的键不同 → id 不同;同一个键 = 客户端声明的同一段对话。
  * 上游不按 conversationId 存历史(每次都整段重发),撞键只影响缓存命中,不会串内容。
  * 证据与复跑入口见 PITFALLS「会话身份映射到 kiro-cli」。
  */
 export function deriveConversationId(sessionKey: string): string {
-  return deriveUuidV4Shape('conversationId', sessionKey);
+  return toKasSessionId(deriveSubConversationId(sessionKey));
 }
 
 /**
- * kiro-cli V2 的 `agentContinuationId` 是「一个用户轮次一个」:同一轮里的工具往返不变,
- * 下一条用户输入(同进程或 `--resume`)换新(2.23.1 抓包)。按「会话 + 轮次序号」派生,
- * 同一轮的每个请求都得到同一个值。subagent 会话不带此字段,由调用方省略。
+ * 子会话(subagent)的 conversationId:KAS 只给顶层会话加 `sess_` 前缀,`invoke_sub_agent` 的子会话
+ * 是裸 UUID,`rootConversationId` 仍指向带前缀的父会话(2.23.1 抓包)。
  */
-export function deriveAgentContinuationId(conversationId: string, userTurn: number): string {
-  return deriveUuidV4Shape('agentContinuationId', `${conversationId}#${userTurn}`);
+export function deriveSubConversationId(sessionKey: string): string {
+  return deriveUuidV4Shape('conversationId', sessionKey);
+}
+
+/** KAS 的会话 id 形如 `sess_<uuid>`;已是这个形态的原样返回。 */
+export function toKasSessionId(uuid: string): string {
+  return uuid.startsWith('sess_') ? uuid : `sess_${uuid}`;
+}
+
+/**
+ * kiro-cli 的 `agentContinuationId` 是「一个用户轮次一个」:同一轮里的工具往返不变,
+ * 下一条用户输入(同进程或 `--resume`)换新(2.23.1 V2 / V3 抓包一致)。按「会话 + 轮次键」派生
+ * (键的构成见 converter 的 `userTurnKey`),同一轮的每个请求都得到同一个值。subagent 会话按自己的
+ * conversationId 派生,轮次各算各的。
+ */
+export function deriveAgentContinuationId(conversationId: string, userTurnKey: string): string {
+  return deriveUuidV4Shape('agentContinuationId', `${conversationId}#${userTurnKey}`);
 }
 
 /** 按「用途 + 种子」派生 UUID v4 形状的值;用途前缀让不同字段的派生值互不相撞。 */
@@ -202,16 +182,14 @@ function deriveUuidV4Shape(purpose: string, seed: string): string {
 }
 
 /**
- * 挂载 toolUses，并按 kiro-cli 的形态一并补 `messageId`——两者绑定出现，故这里是
- * 唯一设置点。`converter.ts` 有两处构造 assistant 历史消息（单条与合并多条），各写
- * 一遍 `if (len>0) msg.toolUses = …` 的话，补字段时必然漏一处。
+ * 挂载 toolUses。`converter.ts` 有两处构造 assistant 历史消息(单条与合并多条),共用这一个
+ * 设置点。KAS 不给 assistant 消息发 `messageId`。
  *
- * 空数组是 no-op：Kiro 对 `toolUses: []` 与不发该字段的处理未验证，保持不发。
+ * 空数组是 no-op:Kiro 对 `toolUses: []` 与不发该字段都收,保持不发。
  */
 export function attachToolUses(msg: AssistantMessage, toolUses: ToolUseEntry[]): void {
   if (toolUses.length === 0) return;
   msg.toolUses = toolUses;
-  msg.messageId = deriveMessageId(toolUses[0].toolUseId);
 }
 
 /**

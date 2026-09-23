@@ -7,19 +7,24 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   _resetKiroClientProfileCacheForTesting,
   getKiroClientProfile,
-  renderUserAgent,
-  renderXAmzUserAgent,
-  requireAmzTarget,
+  renderKasUserAgent,
+  renderKasXAmzUserAgent,
+  renderShellUserAgent,
+  renderShellXAmzUserAgent,
+  requireKasTarget,
 } from '../../src/kiro/client-profile.js';
 
 /**
- * client-profile 模块的职责是「加载并缓存捕获脚本产出的 kiro-cli 请求画像」。
- * 测试要覆盖：
- *   1. 默认 fallback 路径下的返回值（没 fixture 也能跑）
- *   2. `KIRO2CLAUDE_CLIENT_PROFILE_PATH` 环境变量可以指向一个自定义 JSON
- *   3. UA 模板里的 `{service}` 占位能被正确替换
- *   4. 缓存语义：同一进程首次加载后后续读缓存
+ * client-profile 模块的职责是「加载并缓存捕获脚本产出的 kiro-cli 请求画像」,分 `kas`(kiro-cli
+ * `chat --v3` 的对话进程)与 `shell`(Rust 外壳)两个身份。测试覆盖:
+ *   1. 默认(仓库 fixture)下的 V3 形态
+ *   2. UA 模板里 `{jsOs}` / `{os}` / `{service}` 占位的渲染
+ *   3. `KIRO2CLAUDE_CLIENT_PROFILE_PATH` 指向自定义 JSON;V2 时代的旧 fixture 回退到内置快照
+ *   4. optout 隐私约束与缓存语义
  */
+
+const kiroOsToken = (): string =>
+  process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
 
 describe('getKiroClientProfile', () => {
   const originalEnv = process.env.KIRO2CLAUDE_CLIENT_PROFILE_PATH;
@@ -38,115 +43,131 @@ describe('getKiroClientProfile', () => {
     }
   });
 
-  it('returns a profile with kiro-cli aligned defaults', () => {
-    const profile = getKiroClientProfile();
-
-    // mode 是 discriminator，保证后续分支代码拿得到类型收窄
-    expect(profile.mode).toBe('kiro-cli');
-
-    // 断言 body 里的语义字段完全对齐 kiro-cli 2.0+ 实测结果
-    expect(profile.body.origin).toBe('KIRO_CLI');
-    expect(profile.body.agentTaskType).toBe('vibe');
-    expect(profile.body.chatTriggerType).toBe('MANUAL');
-    // envState.operatingSystem 在 profile 层保持 `{os}` 占位，runtime 才会
-    // 按 process.platform 替换成 macos/linux —— 这是跨平台部署的核心设计。
-    expect(profile.body.envState.operatingSystem).toBe('{os}');
-
-    // 静态头部必须至少包含 content-type 和 optout 开关
-    expect(profile.staticHeaders['content-type']).toBe('application/x-amz-json-1.0');
-    expect(profile.staticHeaders['x-amzn-codewhisperer-optout']).toBeDefined();
-
-    // x-amz-target 映射是 kiro-cli 的 Smithy 协议关键字段
-    expect(profile.amzTargets.generateAssistantResponse).toBe(
-      'AmazonCodeWhispererStreamingService.GenerateAssistantResponse',
-    );
-    expect(profile.amzTargets.getUsageLimits).toBe('AmazonCodeWhispererService.GetUsageLimits');
-  });
-
-  it('renderUserAgent replaces both {service} and {os} placeholders', () => {
-    const profile = getKiroClientProfile();
-    const streaming = renderUserAgent(profile, 'codewhispererstreaming');
-    const runtime = renderUserAgent(profile, 'codewhispererruntime');
-
-    expect(streaming).toContain('api/codewhispererstreaming/');
-    expect(streaming).not.toContain('{service}');
-    expect(streaming).not.toContain('{os}');
-    expect(runtime).toContain('api/codewhispererruntime/');
-    expect(runtime).not.toContain('{os}');
-
-    // os token 必须落到当前平台的 kiro-cli 风格字符串之一
-    expect(streaming).toMatch(/\bos\/(macos|linux|windows)\b/);
-
-    // x-amz-user-agent 有自己单独的模板，同样应该 render 成功
-    const xAmzUa = renderXAmzUserAgent(profile, 'codewhispererstreaming');
-    expect(xAmzUa).toContain('api/codewhispererstreaming/');
-    expect(xAmzUa).not.toContain('{service}');
-    expect(xAmzUa).not.toContain('{os}');
-    expect(xAmzUa).toMatch(/\bos\/(macos|linux|windows)\b/);
-  });
-
-  it('picks the os token that matches process.platform', () => {
-    // 根据运行测试的平台，renderUserAgent 里的 `os/{os}` 应该被替换成
-    // 对应的 kiro-cli 字符串：darwin→macos, linux→linux, win32→windows。
-    const profile = getKiroClientProfile();
-    const ua = renderUserAgent(profile, 'codewhispererstreaming');
-    const expected =
-      process.platform === 'darwin'
-        ? 'os/macos'
-        : process.platform === 'linux'
-          ? 'os/linux'
-          : process.platform === 'win32'
-            ? 'os/windows'
-            : 'os/linux'; // 冷门平台 fallback
-    expect(ua).toContain(expected);
-  });
-
-  it('requireAmzTarget returns the value when present', () => {
-    const profile = getKiroClientProfile();
-    const target = requireAmzTarget(profile, 'generateAssistantResponse');
-    expect(target).toBe('AmazonCodeWhispererStreamingService.GenerateAssistantResponse');
-  });
-
-  it('loads a profile from a path supplied via KIRO2CLAUDE_CLIENT_PROFILE_PATH', () => {
+  function withProfileFile(payload: unknown, run: () => void): void {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-cli-profile-test-'));
     const fixturePath = path.join(tmpDir, 'profile.json');
     try {
-      const payload = {
-        kiroCliVersion: 'test-9.9.9',
-        staticHeaders: {
-          'content-type': 'application/x-amz-json-1.0',
-          'x-amzn-codewhisperer-optout': 'true',
-        },
-        userAgent: 'custom/1.0 api/{service}/x os/linux',
-        xAmzUserAgent: 'custom/1.0 api/{service}/x m/X',
-        amzTargets: {
-          generateAssistantResponse: 'Custom.GenerateAssistantResponse',
-          getUsageLimits: 'Custom.GetUsageLimits',
-        },
-        body: {
-          origin: 'TEST_ORIGIN',
-          agentTaskType: 'vibe',
-          chatTriggerType: 'MANUAL',
-          envState: { operatingSystem: 'linux' },
-        },
-      };
       fs.writeFileSync(fixturePath, JSON.stringify(payload));
       process.env.KIRO2CLAUDE_CLIENT_PROFILE_PATH = fixturePath;
-
-      const profile = getKiroClientProfile();
-      expect(profile.kiroCliVersion).toBe('test-9.9.9');
-      expect(profile.body.origin).toBe('TEST_ORIGIN');
-      // Fixture 里 linux 被归一化成 `{os}`；render 时再按当前 process.platform 替换
-      expect(profile.body.envState.operatingSystem).toBe('{os}');
-      expect(profile.amzTargets.generateAssistantResponse).toBe('Custom.GenerateAssistantResponse');
-
-      const ua = renderUserAgent(profile, 'codewhispererstreaming');
-      // 在 darwin CI 上渲染成 `os/macos`，在 linux CI 上渲染成 `os/linux`；
-      // 不 hardcode 具体值，只断言占位符被替换掉了。
-      expect(ua).toMatch(/^custom\/1\.0 api\/codewhispererstreaming\/x os\/(macos|linux|windows)$/);
+      run();
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  }
+
+  it('returns the kiro-cli V3 (KAS) wire shape', () => {
+    const profile = getKiroClientProfile();
+    expect(profile.mode).toBe('kiro-cli');
+
+    expect(profile.kas.body.origin).toBe('AI_EDITOR');
+    expect(profile.kas.body.agentMode).toBe('vibe');
+    expect(profile.kas.body.subagentAgentMode).toBe('general-task-execution');
+    expect(profile.kas.body.agentTaskType).toBe('vibe');
+    expect(profile.kas.body.chatTriggerType).toBe('MANUAL');
+
+    expect(requireKasTarget(profile, 'generateAssistantResponse')).toBe(
+      'KiroRuntimeService.GenerateAssistantResponse',
+    );
+    expect(requireKasTarget(profile, 'invokeMcp')).toBe('KiroRuntimeService.InvokeMCP');
+    expect(profile.shell.amzTargets.getUsageLimits).toBe(
+      'AmazonCodeWhispererService.GetUsageLimits',
+    );
+
+    // KAS 的 GAR 带 attribution、不带 accept;MCP 不带 attribution
+    expect(profile.kas.staticHeaders['x-amzn-kiro-client-attribution']).toBe('unrecognized');
+    expect(profile.kas.staticHeaders).not.toHaveProperty('accept');
+    expect(profile.kas.mcpStaticHeaders).not.toHaveProperty('x-amzn-kiro-client-attribution');
+  });
+
+  it('renders the KAS UA with a Node-style and a kiro-cli-style platform token', () => {
+    const profile = getKiroClientProfile();
+    for (const ua of [renderKasUserAgent(profile), renderKasXAmzUserAgent(profile)]) {
+      expect(ua).toMatch(/^aws-sdk-js\//);
+      expect(ua).not.toMatch(/\{(jsOs|os|service)\}/);
+      expect(ua).toContain(`os/${kiroOsToken()}`);
+    }
+    // user-agent 另带 Node 风格的 `os/<platform>#<release>`
+    expect(renderKasUserAgent(profile)).toContain(`os/${process.platform}#${os.release()}`);
+  });
+
+  it('renders the shell UA with the service id', () => {
+    const profile = getKiroClientProfile();
+    const ua = renderShellUserAgent(profile);
+    expect(ua).toMatch(/^aws-sdk-rust\//);
+    expect(ua).toContain('api/codewhispererruntime/');
+    expect(ua).toContain(`os/${kiroOsToken()}`);
+    expect(renderShellXAmzUserAgent(profile)).not.toMatch(/\{/);
+  });
+
+  it('loads a profile from KIRO2CLAUDE_CLIENT_PROFILE_PATH and normalizes platform tokens', () => {
+    withProfileFile(
+      {
+        kiroCliVersion: 'test-9.9.9',
+        kas: {
+          staticHeaders: { 'content-type': 'application/x-amz-json-1.0' },
+          userAgent: 'custom-js/1.0 os/darwin#25.6.0 lang/js os/macos',
+          xAmzUserAgent: 'custom-js/1.0 os/macos',
+          amzTargets: { generateAssistantResponse: 'Custom.GenerateAssistantResponse' },
+          body: { origin: 'TEST_ORIGIN', agentMode: 'test-mode' },
+        },
+        shell: { userAgent: 'custom-rust/1.0 api/{service}/x os/linux' },
+      },
+      () => {
+        const profile = getKiroClientProfile();
+        expect(profile.kiroCliVersion).toBe('test-9.9.9');
+        expect(profile.kas.body.origin).toBe('TEST_ORIGIN');
+        expect(profile.kas.body.agentMode).toBe('test-mode');
+        // 没写的字段取内置快照
+        expect(profile.kas.body.subagentAgentMode).toBe('general-task-execution');
+        expect(profile.kas.userAgent).toBe('custom-js/1.0 os/{jsOs} lang/js os/{os}');
+        expect(renderKasUserAgent(profile)).toBe(
+          `custom-js/1.0 os/${process.platform}#${os.release()} lang/js os/${kiroOsToken()}`,
+        );
+        expect(renderShellUserAgent(profile)).toBe(
+          `custom-rust/1.0 api/codewhispererruntime/x os/${kiroOsToken()}`,
+        );
+      },
+    );
+  });
+
+  it('falls back to the built-in V3 snapshot for a V2-era fixture (no `kas` section)', () => {
+    withProfileFile(
+      {
+        kiroCliVersion: '2.21.0',
+        userAgent: 'aws-sdk-rust/1.3.15 api/{service}/x os/{os}',
+        amzTargets: {
+          generateAssistantResponse:
+            'AmazonCodeWhispererStreamingService.GenerateAssistantResponse',
+        },
+        body: { origin: 'KIRO_CLI' },
+      },
+      () => {
+        const profile = getKiroClientProfile();
+        expect(profile.kiroCliVersion).toBe('unknown');
+        expect(profile.kas.body.origin).toBe('AI_EDITOR');
+        expect(requireKasTarget(profile, 'generateAssistantResponse')).toBe(
+          'KiroRuntimeService.GenerateAssistantResponse',
+        );
+      },
+    );
+  });
+
+  it('forces the opt-out header on every identity regardless of the fixture', () => {
+    withProfileFile(
+      {
+        kas: {
+          staticHeaders: { 'x-amzn-codewhisperer-optout': 'false' },
+          mcpStaticHeaders: {},
+        },
+        shell: { staticHeaders: { 'x-amzn-codewhisperer-optout': 'false' } },
+      },
+      () => {
+        const profile = getKiroClientProfile();
+        expect(profile.kas.staticHeaders['x-amzn-codewhisperer-optout']).toBe('true');
+        expect(profile.kas.mcpStaticHeaders['x-amzn-codewhisperer-optout']).toBe('true');
+        expect(profile.shell.staticHeaders['x-amzn-codewhisperer-optout']).toBe('true');
+      },
+    );
   });
 
   it('caches the profile across calls', () => {

@@ -14,9 +14,8 @@ import { getLogger, logger } from '../shared/logger.js';
 import { extractRetryAfter } from '../shared/upstream-status.js';
 import {
   getKiroClientProfile,
-  renderUserAgent,
-  renderXAmzUserAgent,
-  requireAmzTarget,
+  renderShellUserAgent,
+  renderShellXAmzUserAgent,
 } from './client-profile.js';
 import type { KiroCredentials } from './model/credentials.js';
 import {
@@ -120,7 +119,7 @@ export class KiroHttpError extends Error {
  *   - us-gov-west-1  → `q.us-gov-west-1.amazonaws.com`
  *   - eu-central-1   → `q.eu-central-1.amazonaws.com`
  *
- * 非 us-east-1 商业 region 暂未实测，按最保守的 `q.{region}` 兜底。
+ * 表外的商业 region 按最保守的 `q.{region}` 兜底。
  *
  * 注意：streaming service（GenerateAssistantResponse / InvokeMCP）走
  * `runtime.{region}.kiro.dev`，和这里的 host 不同。
@@ -270,16 +269,16 @@ export async function getUsageLimits(
 
   const profile = getKiroClientProfile();
   const headers: Record<string, string> = {
-    ...profile.staticHeaders,
-    'x-amz-target': requireAmzTarget(profile, 'getUsageLimits'),
-    'user-agent': renderUserAgent(profile, 'codewhispererruntime'),
-    'x-amz-user-agent': renderXAmzUserAgent(profile, 'codewhispererruntime'),
+    ...profile.shell.staticHeaders,
+    'x-amz-target': profile.shell.amzTargets.getUsageLimits,
+    'user-agent': renderShellUserAgent(profile),
+    'x-amz-user-agent': renderShellXAmzUserAgent(profile),
     host,
     Authorization: `Bearer ${token}`,
   };
-  // 单次调用(不重试),但格式仍走 `applyRetryHeaders` —— 这里曾手写 `attempt=1; max=1`
-  // 字面量,于是同一份 wire 语法散在两处、改一处就漂移。⚠ 本端点没有 `x-kiro-attempt`
-  // 的抓包证据,故不发:补一个未经实测的头等于凭空改画像。
+  // 单次调用(不重试),但格式仍走 `applyRetryHeaders`:手写 `attempt=1; max=1` 字面量会让
+  // 同一份 wire 语法散在两处、改一处就漂移。⚠ 本端点没有 `x-kiro-attempt` 的抓包证据,
+  // 故不发:补一个没抓到过的头等于凭空改画像。
   // 该路径**故意**不走 RetryExecutor:它抛 ProviderError,而 `/kiro/usage` 与
   // plugin capability 都按 KiroHttpError 分流(见 routes/kiro.ts translateUsageError),
   // 且 executor 的 body 分类器是按 messages 端点的错误体设计的。要统一得连错误语义

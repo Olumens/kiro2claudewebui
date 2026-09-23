@@ -12,14 +12,13 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import {
   ConversionError,
   type ConversionResult,
-  clientModelHasEncryptedReasoning,
   convertRequest,
+  responseThinkingEnabled,
   toKiroRequest,
 } from '../claude/converter.js';
 import { captureEmptyRequest, type MessageHandlerResult } from '../claude/empty-capture.js';
 import type { PostMessagesDeps } from '../claude/handlers.js';
 import { buildToolTextRegistry } from '../claude/tool-call-text.js';
-import { isThinkingEnabled } from '../claude/types.js';
 import { serializeKiroRequest } from '../kiro/model/requests/kiro.js';
 import { getLogger } from '../shared/logger.js';
 import { getRequestContext } from '../shared/request-context.js';
@@ -95,9 +94,9 @@ export function createPostChatCompletions(deps: PostMessagesDeps) {
         rejectUnsupportedDocuments: deps.rejectUnsupportedDocuments,
         toolDescriptionMaxLen: deps.toolDescriptionMaxLen,
         toolTextRegistry: rescueRegistry,
-        session: oaiReq.prompt_cache_key
-          ? { key: oaiReq.prompt_cache_key, subagent: false }
-          : undefined,
+        // 按 OpenAI 语义当缓存分组用:多个会话共用一个 key 不互相挤缓存,还共享公共前缀
+        // (实测见 PITFALLS「会话身份映射到 kiro-cli」的缓存作用域)。
+        session: oaiReq.prompt_cache_key ? { key: oaiReq.prompt_cache_key } : undefined,
       });
     } catch (e) {
       if (e instanceof ConversionError) {
@@ -130,13 +129,8 @@ export function createPostChatCompletions(deps: PostMessagesDeps) {
       payload.tools,
     );
 
-    // 仅 GPT(加密 reasoning)从响应开始就关掉 legacy `<thinking>` 解码；运行时 native
-    // event 也会锁模式，但静态判定还能覆盖 redacted event 缺失/晚到，避免误解 GPT
-    // 可见输出里的字面标签。Claude 原生 reasoning(明文)不纳入(见 converter.ts)。
     const extractThinking =
-      deps.extractThinking &&
-      isThinkingEnabled(payload.thinking) &&
-      !clientModelHasEncryptedReasoning(payload.model);
+      deps.extractThinking && responseThinkingEnabled(payload.thinking, payload.model);
     const toolNameMap = conversionResult.toolNameMap;
 
     let result: MessageHandlerResult;

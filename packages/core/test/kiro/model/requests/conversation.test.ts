@@ -7,7 +7,9 @@ import {
   createConversationState,
   createUserInputMessage,
   createUserMessage,
+  deriveConversationId,
   type Message,
+  toKasSessionId,
 } from '../../../../src/kiro/model/requests/conversation.js';
 import {
   type KiroRequest,
@@ -26,9 +28,8 @@ describe('ConversationState', () => {
   });
 
   it('returns a bare structural shell with no origin/envState', () => {
-    // 工厂层只铺结构占位——语义字段（origin / envState）一律由 converter
-    // 在每次请求处理时注入。origin 来自 client-profile，envState 依赖
-    // runtime 的 process.cwd()，两者都不是工厂层能决定的。
+    // 工厂层只铺结构占位——origin 由 converter 从 client-profile 注入(单一写入点);
+    // envState 是 V2 字段,KAS 不发。
     const msg = createUserInputMessage('Hello', 'claude-3-5-sonnet');
 
     expect(msg.content).toBe('Hello');
@@ -90,52 +91,42 @@ describe('ConversationState', () => {
 });
 
 /**
- * kiro-cli 2.21.1 实测：`messageId`（客户端生成的 UUID v4）**只出现在带 toolUses
- * 的 assistant 消息上**，纯文本那条没有。两者绑定，所以只有 `attachToolUses`
- * 一个设置点。
- *
- * ★ 同批探针实测还证明它是**每条消息一个、跨轮恒定**（同一条消息的 messageId 在
- * 246 轮工具往返请求里只有一个取值）。所以派生必须确定性——随机值会让历史前缀
- * 每轮变字节、打掉上游 prefix 缓存。守卫在下面两条。
+ * `attachToolUses` 是 assistant 消息 toolUses 的唯一设置点:KAS 不给 assistant 消息发 V2 的
+ * `messageId`,空数组不设字段。守卫在下面两条。
  */
 describe('attachToolUses', () => {
   const TOOL_USE = { toolUseId: 'tooluse_1', name: 'Read', input: { file_path: '/a' } };
 
-  it('挂 toolUses 时一并生成 UUID v4 messageId', () => {
+  it('只挂 toolUses:KAS 不给 assistant 消息发 V2 的 messageId', () => {
     const msg = createAssistantMessage('ok');
     attachToolUses(msg, [TOOL_USE]);
 
     expect(msg.toolUses).toEqual([TOOL_USE]);
-    const id = msg.messageId ?? '';
-    expect(isUuid(id) && uuidVersion(id) === 4).toBe(true);
+    expect(JSON.stringify(msg)).not.toContain('messageId');
   });
 
-  it('反向守卫：无 toolUses 时不设 messageId，也不设空 toolUses 数组', () => {
+  it('反向守卫：无 toolUses 时不设空 toolUses 数组', () => {
     const msg = createAssistantMessage('纯文本回复');
     attachToolUses(msg, []);
 
-    expect(msg.messageId).toBeUndefined();
     expect(msg.toolUses).toBeUndefined();
     expect(JSON.stringify(msg)).not.toContain('toolUses');
   });
+});
 
-  it('同一条消息跨轮恒定：相同 toolUseId → 相同 messageId（保住上游 prefix 缓存）', () => {
-    const a = createAssistantMessage('x');
-    const b = createAssistantMessage('x');
-    attachToolUses(a, [TOOL_USE]);
-    attachToolUses(b, [TOOL_USE]);
-
-    // 每请求重新转换一遍历史,随机值会让历史前缀每轮换字节
-    expect(a.messageId).toBe(b.messageId);
+describe('deriveConversationId', () => {
+  it('派生 KAS 形态的会话 id:同键恒定、异键不同,且不暴露原键', () => {
+    const a = deriveConversationId('thread-a');
+    expect(a).toMatch(/^sess_/);
+    const uuid = a.slice('sess_'.length);
+    expect(isUuid(uuid) && uuidVersion(uuid) === 4).toBe(true);
+    expect(deriveConversationId('thread-a')).toBe(a);
+    expect(deriveConversationId('thread-b')).not.toBe(a);
+    expect(a).not.toContain('thread-a');
   });
 
-  it('不同消息互不相同：不同 toolUseId → 不同 messageId', () => {
-    const a = createAssistantMessage('x');
-    const b = createAssistantMessage('y');
-    attachToolUses(a, [TOOL_USE]);
-    attachToolUses(b, [{ ...TOOL_USE, toolUseId: 'tooluse_2' }]);
-
-    expect(a.messageId).not.toBe(b.messageId);
-    expect(uuidVersion(b.messageId ?? '')).toBe(4);
+  it('toKasSessionId 只补一次前缀', () => {
+    expect(toKasSessionId('abc')).toBe('sess_abc');
+    expect(toKasSessionId('sess_abc')).toBe('sess_abc');
   });
 });

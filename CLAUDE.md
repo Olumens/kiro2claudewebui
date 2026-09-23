@@ -69,17 +69,18 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 | `KIRO2CLAUDE_*` 环境变量 | `model/schemas/config-schema.ts` + `.env.example` |
 | Plugin 契约 / 怎么写 plugin | `packages/plugin-api/src/types.ts`;`docs/PLUGIN-DEVELOPMENT.md` + `packages/examples/echo-plugin/` |
 | 支持哪些模型 / 加模型要同改哪几处 | `claude/models-catalog.ts` + `mapModel()`;同改清单见 PITFALLS「支持哪些模型」 |
-| 原生 reasoning / context window / effort 映射 | `MODELS_WITH_NATIVE_REASONING`、`getContextWindowSize()`(GPT 窗口可由 `KIRO2CLAUDE_GPT_CONTEXT_WINDOW` 覆盖)、`buildAdditionalModelRequestFields()` + `resolveEffort()`(`converter.ts`,落到请求顶层 `additionalModelRequestFields`,`toKiroRequest` 装配);OpenAI `reasoning_effort` 见 `openai/converter.ts` |
+| 原生 reasoning / context window / effort 映射 | `MODELS_WITH_NATIVE_REASONING`、`getContextWindowSize()`(GPT 窗口可由 `KIRO2CLAUDE_GPT_CONTEXT_WINDOW` 覆盖)、`effectiveThinking()`(上游字段与响应侧 thinking 通道的同一判定)→ `buildAdditionalModelRequestFields()` + `resolveEffort()` + `defaultEffort()`(`converter.ts`,落到请求顶层 `additionalModelRequestFields`,`toKiroRequest` 装配;客户端没指定时同 KAS 补 schema 默认);OpenAI `reasoning_effort` 见 `reasoningConfigFromEffort` |
 | legacy `<thinking>` 怎么解析 | `claude/stream/legacy-thinking-decoder.ts` 头注释;流式 `processLegacyThinkingItems` 与非流式 `non-stream-reduce.ts` 必须同源 |
 | Codex 的工具怎么进来 / freeform 双向 | `openai/responses/converter.ts` `collectTools` + `expandNamespaces`;`openai/freeform-tool.ts`;下行经 `customToolNames` 还原 |
-| OpenAI usage / Responses reasoning | `openai/` 直读 reducer 原始 token(踩坑「OpenAI prompt_tokens」);Claude thinking → `reasoning` item;声明 `include` 时 Claude 签名 / GPT 密文经 `reasoning-envelope.ts` 往返 |
-| conversationId / agentContinuationId 从哪来 | `resolveConversationIdentity`(`claude/converter.ts`)+ `convertRequest` 的 `session` 选项;Codex 线程见 `responsesSession` |
-| 原生 reasoning / effort / system 的 wire 位置 | PITFALLS 同名条目;探针 `test/manual/reasoning-wire-probe.ts`(直打)、`kiro-cli-capture-proxy.mjs`(录 kiro-cli) |
+| OpenAI usage / Responses reasoning | `openai/` 直读 reducer 原始 token(踩坑「OpenAI prompt_tokens」);Claude thinking → `reasoning` item;声明 `include` 时 Claude 签名 / GPT 推理经 `claude/reasoning-envelope.ts` 往返 |
+| GPT 推理(不透明)怎么处理 | `claude/stream/opaque-reasoning.ts`(流式 / 非流式共用)→ Messages `redacted_thinking`、Responses `encrypted_content`,Chat 不回传 |
+| conversationId / rootConversationId / agentContinuationId / agentMode 从哪来 | `resolveConversationIdentity`(`claude/converter.ts`)+ `convertRequest` 的 `session` / `claudeCodeAgentId` 选项;Codex 线程见 `responsesSession` |
+| 原生 reasoning / effort / system 的 wire 真相 | PITFALLS 同名条目;探针 `test/manual/reasoning-wire-probe.ts`(直打)、`kiro-cli-capture-proxy.mjs`(录 kiro-cli) |
 | 身份覆写 | `IDENTITY_OVERRIDE_DIRECTIVE` + `KIRO2CLAUDE_IDENTITY_OVERRIDE`(默认关,原因见该常量头注释)|
 | 网关往对话里塞了哪些文本 | `buildSystemPrefix` + `foldSystemIntoFirstUserMessage`(Kiro 消息层,首条 user 最前、图例之前);其余 = `converter.ts` 文件头导出常量 + `prependImageLegend` / `imagePlaceholder` |
 | 客户端中途插入的内容会不会丢 | 只走 `foldSystemMessages` + 末尾 user 连串 = 当前轮;其它 role 400 `InvalidRole`。验证工具见 manual README |
 | 上游 status → 下游 status / 容量不足三形态 | `claude/error-mapper.ts` + `shared/upstream-status.ts`;`MODEL_CAPACITY_REASONS` 头注释(`kiro/provider-error.ts`)|
-| kiro-cli 伪装 wire / fixture 升版本 | `fixtures/kiro-cli-profile.json` + `kiro/client-profile.ts`;`scripts/capture-kiro-cli.sh` → commit `fixtures/`,版本号由 `.releaserc.json` 从 fixture 派生 |
+| 上游 wire(kiro-cli V3 / KAS)/ fixture 升版本 | `fixtures/kiro-cli-profile.json`(`kas` / `shell` 两个身份)+ `kiro/client-profile.ts`;`scripts/capture-kiro-cli.sh`(`KIRO_KAS_ENDPOINT` 指向 mock)→ commit `fixtures/`,版本号由 `.releaserc.json` 从 fixture 派生 |
 | 重试头 | `applyRetryHeaders`(`kiro/retry-executor.ts`)唯一 owner;三个调用点与红线见 PITFALLS「重试头」;守卫 `test/kiro/retry-headers.test.ts` |
 | plugin 注入 `usage` / `kiro.*` meta 键 | `event.addExtension` / `overrideStandardField`;meta 键 = `buildKiroUsageFinishEvent`,文档 `plugin-api/src/types.ts` `getMeta` + PLUGIN-DEVELOPMENT「Meta 键」,守卫 `test/static/usage-meta-contract.test.ts`,**加键同改三处** |
 | 上游已扣费但没记账 | `isMeteringLost`(`claude/stream.ts`),估规模前读其头注释的口径偏差 |
@@ -160,6 +161,8 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 
 ### 请求转换 · 工具(Claude→Kiro)
 
+- ★ **上游 wire 只有 kiro-cli V3(KAS)一套**:target / UA / 头 / body 全部取 profile 的 `kas` 身份(GetUsageLimits 走 `shell`);唯一有意偏离是 system 折叠(见下条);别把 V2 的 envState / messageId / `KIRO_CLI` / REST 路径加回来。守卫 `test/static/kiro-wire-v3.test.ts` + `test/kiro/provider-v3-wire.test.ts`;差异表见 PITFALLS「kiro-cli V3(KAS)的 wire」
+
 - ★ **注入文本**:system 没有 wire 通道,`buildSystemPrefix` → `foldSystemIntoFirstUserMessage` 在 Kiro 消息层拼进首条 user;网关不造任何 assistant 轮次;中途插入的 `role:system` 只走 `foldSystemMessages`;其它 role 400 `InvalidRole`;OpenAI 侧只提升开头的 system/developer。守卫 `test/static/no-fabricated-turns.test.ts` + `converter.test.ts` system 折叠组
 - **core 不发 cachePoint**:Kiro 静默忽略 `cache_control`,`convertTools` 只输出 `{toolSpecification}`
 - **convertTools 剥 tool-search marker**:无 `input_schema` 的 marker 上送会 400,`isToolSearchTool()` 丢掉、忽略 `defer_loading`
@@ -176,12 +179,12 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 - ★ **legacy thinking 文法**:开标签只认「行首」,两边都错过;文法与终态判定流式/非流式必须同源。真相源 `legacy-thinking-decoder.ts` 头注释;守卫 `test/claude/legacy-thinking-{decoder,nonstream}.test.ts`
 - **原生 reasoning 的空帧**:锁 native 模式,但不打断已开的 thinking 块、不 flush 救援检测器。真相源 `processReasoningContent` 头注释
 - **上游杀卡住的流**:判别子是 token/s 不是总时长;网关无治本手段,缓解 `armDrainGrace`
-- ★ **读坏的 body 是失败的响应**:读流异常 / CRC·JSON 解码失败 / 残留半帧走与上游错误帧同一条路径;缺 Metering 不算损坏,缺 `metadataEvent` 是未完成不是故障;损坏的 body 不可伪装成空流蹭重试。守卫 `test/claude/transport-integrity.test.ts` + `test/kiro/parser/decoder.test.ts`
+- ★ **读坏的 body 是失败的响应**:读流异常 / CRC·JSON 解码失败 / 残留半帧走与上游错误帧同一条路径;缺 Metering 不算损坏,缺 `metadataEvent` 是未完成不是故障;损坏的 body 不可当成空流蹭重试。守卫 `test/claude/transport-integrity.test.ts` + `test/kiro/parser/decoder.test.ts`
 - ★ **帧边界 EOF**:有内容 + 无错误 + 无 `metadataEvent` → `max_tokens`(Responses `incomplete`);只取「出现过」不用其 `stopReason`;fixture 的正常完成必须带尾帧(`completedFrames()`)。守卫 `test/claude/clean-eof-terminal.test.ts` + `conversation-content-integrity.test.ts`
 
 ### 多模型 · GPT · OpenAI · Codex
 
-- **GPT 完全相同上游**:唯一差异 `modelId`;`processReasoningContent` 把「见过原生帧」与「有内容可 surface」分开记,合并即错
+- **GPT 完全相同上游**:唯一差异 `modelId`(外加按模型 schema 的 `additionalModelRequestFields`);`processReasoningContent` 把「见过原生帧」与「有内容可 surface」分开记,合并即错
 - ★ **GPT context window 随上游漂移**:`input_tokens` = 上游百分比 × `getContextWindowSize()`,上游改窗口只缩放不报错;2026-09-14 起 GPT-5.6 为 1M,按 272K 算低报 3.68 倍 → Codex 把上下文养过 Kiro 的 272K 双倍计费线。默认 1M,未拿到 1M 的账号用 `KIRO2CLAUDE_GPT_CONTEXT_WINDOW=272000`;守卫 `test/claude/reasoning-native.test.ts`
 - **OpenAI prompt_tokens**:是输入总量,`openai/` usage 直接读 reducer 原始 token、绕过 `buildClaudeUsagePayload`
 - **Codex 只说 Responses**:编码器红线在 `openai/responses/response-stream.ts` 头注释,改前先跑真实 Codex(`tools/codex/`)
@@ -189,8 +192,8 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 - **Messages hosted WebSearch**:`websearch.ts` 保留协议与失败语义,同名普通 function 不能被劫持。守卫 `test/claude/websearch-transport.test.ts`
 - **Codex 侧无法用 web search**:要支持是新功能,不是转发能解决的
 - ★ **thinking / effort 的 wire 规则**:只有 adaptive 语义(`enabled` 入口归一、`budget_tokens` 丢弃),effort 只看 `output_config.effort` 且只发在顶层 `additionalModelRequestFields`;非原生模型不做 thinking 控制;history thinking 只走 `assistantResponseMessage.reasoningContent`,带签名才发、无签名丢弃、禁止拼 `<thinking>` 文本;`THINKING_SIGNATURE_INVALID` 由 `RetryExecutor` 剥掉重发一次;顶层 `systemPrompt` 上游拒收。守卫 `test/static/no-thinking-tag-stitching.test.ts` + `test/claude/converter-reasoning-content.test.ts` + `test/kiro/retry-executor-thinking-signature.test.ts`;证据见 PITFALLS「原生 reasoning / effort / system 的 wire 真相」
-- ★ **会话身份映射到 kiro-cli / 推理往返**:缓存按 conversationId 给,每请求随机 = 每轮冷价(Codex 同任务约 3.3 倍 credit);按 kiro-cli V2 形态映射——会话一个 conversationId、用户轮次一个 agentContinuationId、Codex subagent(`thread-id` ≠ key)= 独立会话且不带 acid,真相源 `resolveConversationIdentity` / `responsesSession`;隔离靠上游不存历史、信封不存网关状态且绑定 modelId。守卫 `test/claude/converter-conversation-identity.test.ts` + `test/openai/responses/reasoning-roundtrip.test.ts`,复跑 `test/manual/session-isolation-live.mjs`
-- **GPT credit 锚定**:`credits×0.04` 是唯一真值,**绝不给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`**;红线在 `gptCreditAnchoredBreakdown` 头注释
+- ★ **会话身份映射到 kiro-cli / 推理往返**:GPT 缓存按 conversationId 给(Claude 按内容),每请求随机 = 每轮冷价(Codex 同任务约 3.3 倍 credit);按 KAS 形态映射——会话一个 `sess_` id、用户轮次一个 agentContinuationId、subagent(Codex `thread-id` ≠ key、Claude Code `x-claude-code-agent-id`)= 独立会话(裸 UUID)+ `rootConversationId` 指父 + 子 agent 的 `agentMode`;Codex 的 `<subagent_notification>` 只在 Responses 适配层并入工具结果、不开新轮次,真相源 `resolveConversationIdentity` / `responsesSession`;GPT 推理不透明、不展示、经信封回传;隔离靠上游不存历史、信封不存网关状态且绑定 modelId。守卫 `test/claude/converter-conversation-identity.test.ts` + `test/openai/responses/{reasoning-roundtrip,subagent-notification}.test.ts` + `test/claude/opaque-gpt-reasoning.test.ts`,复跑 `test/manual/session-{isolation,concurrency}-live.mjs`
+- **GPT credit 锚定与缓存反演**:成本锚定 `credits×0.04`,缓存按 GPT 自己的公式反演(缓存价 0.1×、按 conversationId 命中、只低估不虚报),**绝不给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`**;常数与证据在 `gptCacheDerivedBreakdown` 头注释
 
 ### 错误流转 · 容量事件诊断
 
@@ -198,7 +201,7 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 
 ## 测试
 
-- vitest,每个 workspace 包自带 `vitest.config.ts`;pre-commit 强制 `biome check + pnpm -r typecheck + pnpm -r test`
+- vitest,每个 workspace 包自带 `vitest.config.ts`;pre-commit 强制 `biome check + pnpm -r typecheck + pnpm -r test + markdownlint`
 - **e2e 不进 CI**(`packages/core/test/e2e/`,消耗真实 token),也不在任何 tsconfig 里,改它要单独 tsc
 - **`test/scripts/` 测的是 shell 脚本**:假 `docker` 记录调用参数,断言命令行长什么样;不碰本机 `.env`、凭据、镜像
 - **默认测试模型 `claude-opus-5`**,只管真打上游的那几层;单测里的 `claude-opus-4-6` 是 fixture 常量,别全局替换

@@ -343,13 +343,9 @@ function generateSearchSummary(query: string, results: WebSearchResults | undefi
   if (results && results.results.length > 0) {
     results.results.forEach((result, i) => {
       summary += `${i + 1}. **${result.title}**\n`;
-      if (result.snippet) {
-        // Truncate long snippets (safe UTF-8)
-        const chars = [...result.snippet];
-        const truncated =
-          chars.length > 200 ? `${chars.slice(0, 200).join('')}...` : result.snippet;
-        summary += `   ${truncated}\n`;
-      }
+      // snippet 全文照录:这段摘要是搜索结果进入模型上下文的唯一通道——下一轮历史里的
+      // `web_search_tool_result` 块没有 Kiro 对应物,converter 不上送它(见 convertAssistantMessage)。
+      if (result.snippet) summary += `   ${result.snippet}\n`;
       summary += `   Source: ${result.url}\n\n`;
     });
   } else {

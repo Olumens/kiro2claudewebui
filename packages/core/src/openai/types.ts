@@ -3,11 +3,11 @@
  *
  * 只覆盖网关实际读写的字段;采样类参数(temperature/top_p/…)与不支持的特性
  * (n>1/logprobs/…)不建模,由 schema 的 passthrough 接住、converter 忽略
- * (见 openai/converter.ts 与方案「边界处置」)。
+ * (见 openai/converter.ts)。
  *
  * `reasoning_content` 是非标准但通行的推理透传字段(DeepSeek-R1 / vLLM /
  * OpenRouter 约定):Claude 模型的明文 thinking 经此透传;GPT-5.6 的 reasoning
- * 是加密的(上游 redactedContent),无内容可透传,故 GPT 响应不含该字段。
+ * 不透明(只有占位文本与密文签名),Chat 协议无处回传,故 GPT 响应不含该字段。
  */
 
 // ============================================================================

@@ -23,9 +23,10 @@
  * kiro-cli chat --no-interactive --trust-tools= --model claude-opus-5 --effort max "..."
  * kiro-cli chat --no-interactive --trust-tools= --resume "..."      # 第二轮看 history
  *
- * # V3(KAS):子进程自己有 HTTP 客户端,靠 env 覆盖
+ * # V3(KAS,网关模拟的形态):子进程自己有 HTTP 客户端,靠 env 覆盖(2.23.1+ 非交互也认;
+ * # 别用 KIRO_KAS_SERVER_PATH 包装器,那样录出的 UA 是 `KAS/unknown`)
  * KIRO_KAS_ENDPOINT=http://127.0.0.1:18446 KIRO_KAS_CONTROL_PLANE_ENDPOINT=http://127.0.0.1:18446 \
- *   kiro-cli chat --v3 --no-interactive --trust-tools= --model claude-opus-5 --effort max "..."
+ *   kiro-cli chat --v3 --no-interactive --trust-tools= --model claude-opus-5 "..."
  *
  * # ★ 必须还原
  * for k in api.codewhisperer.service api.krs.service api.cps.service; do kiro-cli settings --delete "$k"; done

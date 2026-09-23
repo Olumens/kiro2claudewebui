@@ -113,7 +113,6 @@ describe('assistant continuation retains client history', () => {
         toolUseId: 'call_1',
         content: [{ text: INTERRUPTED_TOOL_RESULT_TEXT }],
         status: 'error',
-        isError: true,
       },
     ]);
     expect(INTERRUPTED_TOOL_RESULT_TEXT).toContain('execution status and effects are unknown');
@@ -131,10 +130,10 @@ describe('assistant continuation retains client history', () => {
     expect(results).toHaveLength(2);
     expect(results[0]).toMatchObject({
       toolUseId: 'first',
-      isError: true,
+      status: 'error',
       content: [{ text: 'permission denied' }],
     });
-    expect(results[1]).toMatchObject({ toolUseId: 'second', isError: true, status: 'error' });
+    expect(results[1]).toMatchObject({ toolUseId: 'second', status: 'error' });
   });
 
   it('keeps Kiro content nonempty for an empty assistant prefill', () => {
@@ -174,7 +173,7 @@ describe('unpaired and conflicting tool results remain quoted evidence', () => {
         result: {
           toolUseId: 'missing_call',
           content: [{ text: output }],
-          isError: true,
+
           status: 'error',
         },
       },
@@ -234,7 +233,7 @@ describe('unpaired and conflicting tool results remain quoted evidence', () => {
     expect(current.userInputMessageContext.toolResults).toHaveLength(1);
     expect(current.userInputMessageContext.toolResults[0]).toMatchObject({
       content: [{ text: 'original output' }],
-      isError: false,
+      status: 'success',
     });
     expect(current.content).toContain(DUPLICATE_TOOL_RESULT_TEXT);
     expect(quoted(current)).toEqual([
@@ -243,7 +242,6 @@ describe('unpaired and conflicting tool results remain quoted evidence', () => {
         result: {
           toolUseId: 'call_1',
           content: [{ text }],
-          isError,
           status: isError ? 'error' : 'success',
         },
       },
@@ -271,7 +269,7 @@ describe('unpaired and conflicting tool results remain quoted evidence', () => {
     expect(evidence).toHaveLength(1);
     expect(evidence[0]).toMatchObject({
       kind: 'duplicate_tool_result',
-      result: { content: [{ text: 'conflicting' }], isError: true },
+      result: { content: [{ text: 'conflicting' }], status: 'error' },
     });
     expect(state.currentMessage.userInputMessage.content).not.toContain(DUPLICATE_TOOL_RESULT_TEXT);
   });
@@ -317,7 +315,7 @@ describe('unpaired and conflicting tool results remain quoted evidence', () => {
       kind: 'duplicate_tool_result',
       result: {
         toolUseId: 'call_1',
-        isError: true,
+        status: 'error',
         content: [{ text: '[image 1 attached to this message]' }],
       },
     });
