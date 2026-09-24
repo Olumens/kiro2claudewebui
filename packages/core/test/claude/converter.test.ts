@@ -11,6 +11,7 @@ import {
   UNSUPPORTED_DOCUMENT_PLACEHOLDER,
   usesNativeReasoning,
 } from '../../src/claude/converter.js';
+import { MODELS } from '../../src/claude/models-catalog.js';
 import type { Tool as ClaudeTool, MessagesRequest, Metadata } from '../../src/claude/types.js';
 import { preprocessSystem } from '../../src/claude/types.js';
 import { deriveConversationId } from '../../src/kiro/model/requests/conversation.js';
@@ -83,17 +84,50 @@ describe('mapModel', () => {
     expect(mapModel('claude-opus-5')).toBe('claude-opus-5');
     expect(mapModel('claude-opus-5-thinking')).toBe('claude-opus-5');
     expect(mapModel('anthropic.claude-opus-5')).toBe('claude-opus-5');
-    // 大小写 / dated 变体都靠单个 dash-form opus-5 判别子命中（与 sonnet-5 一致）
+    // 大小写 / dated 变体:8 位日期不算 minor 版本
     expect(mapModel('Claude-Opus-5')).toBe('claude-opus-5');
     expect(mapModel('claude-opus-5-20260720')).toBe('claude-opus-5');
+    expect(mapModel('claude-opus-5-20260720-thinking')).toBe('claude-opus-5');
   });
 
   it('test_map_model_opus_5_not_confused_with_4_5', () => {
-    // 边界: opus-5 判别子避开 '4',不误伤 opus 4.5(子串 opus-4-5 / opus-4.5，
-    // 不含 opus-5)。回归 bug: 无此隔离时 claude-opus-5 会 fallthrough 到 4.6 兜底。
+    // 版本号取紧挨家族名的那段:opus-4-5 是 4.5,不是 5
     expect(mapModel('claude-opus-4-5')).toBe('claude-opus-4.5');
     expect(mapModel('claude-opus-4.5')).toBe('claude-opus-4.5');
     expect(mapModel('claude-opus-4-5-20251101-thinking')).toBe('claude-opus-4.5');
+  });
+
+  it('test_map_model_newer_than_known_undefined', () => {
+    // 回归 bug:子串匹配 'opus-5' 曾把 opus-5-5 / opus-5.5 静默映到 claude-opus-5,
+    // opus-6 掉进 4.6 兜底。上游没有的更新版本一律 400,不静默换成旧模型
+    expect(mapModel('claude-opus-5-5')).toBeUndefined();
+    expect(mapModel('claude-opus-5.5')).toBeUndefined();
+    expect(mapModel('claude-opus-5-5-thinking')).toBeUndefined();
+    expect(mapModel('claude-opus-5-5[1m]')).toBeUndefined();
+    expect(mapModel('claude-opus-6')).toBeUndefined();
+    expect(mapModel('claude-sonnet-5-5')).toBeUndefined();
+    expect(mapModel('claude-sonnet-6')).toBeUndefined();
+    expect(mapModel('claude-haiku-5')).toBeUndefined();
+    expect(mapModel('claude-fable-5-10')).toBeUndefined();
+  });
+
+  it('test_map_model_legacy_names_keep_fallback', () => {
+    // 没有版本号或比已知版本老的写法照旧走家族兜底
+    expect(mapModel('claude-3-opus-20240229')).toBe('claude-opus-4.6');
+    expect(mapModel('claude-opus-4-1-20250805')).toBe('claude-opus-4.6');
+    expect(mapModel('gpt-opus')).toBe('claude-opus-4.6');
+    expect(mapModel('claude-3-7-sonnet-20250219')).toBe('claude-sonnet-4.5');
+    expect(mapModel('claude-3-5-haiku-20241022')).toBe('claude-haiku-4.5');
+  });
+
+  it('test_map_model_other_spellings', () => {
+    // 版本在前 / 空格分隔 / provider 前缀与后缀
+    expect(mapModel('claude-4.7-opus')).toBe('claude-opus-4.7');
+    expect(mapModel('claude-4.6-sonnet')).toBe('claude-sonnet-4.6');
+    expect(mapModel('Claude Opus 4.5')).toBe('claude-opus-4.5');
+    expect(mapModel('us.anthropic.claude-opus-4-5-20251101-v1:0')).toBe('claude-opus-4.5');
+    expect(mapModel('claude-opus-4-5@20251101')).toBe('claude-opus-4.5');
+    expect(mapModel('anthropic/claude-opus-4.8')).toBe('claude-opus-4.8');
   });
 
   it('test_map_model_thinking_suffix_haiku', () => {
@@ -107,7 +141,7 @@ describe('mapModel', () => {
   });
 
   it('test_map_model_sonnet_5_not_confused_with_4_5', () => {
-    // 边界: 'claude-sonnet-4-5' 含 '5' 但含的是 'sonnet-4-5',不能被 sonnet-5 规则误伤
+    // 边界: 'claude-sonnet-4-5' 含 '5',但紧挨家族名的版本是 4.5
     expect(mapModel('claude-sonnet-4-5-20250929')).toBe('claude-sonnet-4.5');
     expect(mapModel('claude-sonnet-4-5-20250929-thinking')).toBe('claude-sonnet-4.5');
   });
@@ -158,6 +192,11 @@ describe('mapModel', () => {
     expect(mapModel('gpt-5-codex-mini')).toBe('gpt-5.6-sol');
     // sol/terra/luna 判别子优先于 codex
     expect(mapModel('gpt-5.6-terra')).toBe('gpt-5.6-terra');
+  });
+
+  it('test_map_model_covers_catalog', () => {
+    // 新版本不再静默降级:catalog 列出却没进 mapModel 家族表的模型会恒 400
+    for (const { id } of MODELS) expect(mapModel(id), id).toBeDefined();
   });
 });
 

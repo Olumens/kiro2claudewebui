@@ -117,18 +117,70 @@ export const DUPLICATE_TOOL_RESULT_TEXT =
 // ============================================================================
 
 /**
+ * 紧挨家族名的版本号,编码为 `major * 100 + minor`(4.5 → 405,5 → 500)。先认 `opus-4-5` /
+ * `opus-4.5` / `opus 4.5`,再认版本在前的 `claude-3-5-sonnet` / `claude-4.7-opus`。minor 只认
+ * 1–2 位,所以 `opus-5-20260720` 的 8 位日期不是 minor;没有版本号的写法(`claude-opus`)→ undefined。
+ */
+function claudeFamilyVersion(lower: string, family: string): number | undefined {
+  const m =
+    new RegExp(`${family}[- ]?(\\d{1,2})(?:[-.](\\d{1,2}))?(?!\\d)`).exec(lower) ??
+    new RegExp(`(?<!\\d)(\\d{1,2})(?:[-.](\\d{1,2}))?[- ]?${family}`).exec(lower);
+  if (m === null) return undefined;
+  return Number(m[1]) * 100 + Number(m[2] ?? 0);
+}
+
+interface ClaudeFamily {
+  readonly name: string;
+  readonly versions: ReadonlyMap<number, string>;
+  readonly newest: number;
+  readonly fallback: string | undefined;
+}
+
+/** 版本号由上游 id 自己解析;上游 id 有的带小数点有的不带(`claude-opus-5`),以 list-models 为准。 */
+function claudeFamily(
+  name: string,
+  upstreamIds: readonly string[],
+  fallback: string | undefined,
+): ClaudeFamily {
+  const versions = new Map<number, string>();
+  for (const id of upstreamIds) {
+    const version = claudeFamilyVersion(id, name);
+    if (version === undefined) throw new Error(`no ${name} version in upstream id: ${id}`);
+    versions.set(version, id);
+  }
+  return { name, versions, newest: Math.max(...versions.keys()), fallback };
+}
+
+const CLAUDE_FAMILIES: readonly ClaudeFamily[] = [
+  claudeFamily(
+    'sonnet',
+    ['claude-sonnet-4.5', 'claude-sonnet-4.6', 'claude-sonnet-5'],
+    'claude-sonnet-4.5',
+  ),
+  claudeFamily(
+    'opus',
+    ['claude-opus-4.5', 'claude-opus-4.6', 'claude-opus-4.7', 'claude-opus-4.8', 'claude-opus-5'],
+    'claude-opus-4.6',
+  ),
+  claudeFamily('haiku', ['claude-haiku-4.5'], 'claude-haiku-4.5'),
+  // Kiro 只上了 5.1:Fable 5 等其它版本不静默换成 5.1
+  claudeFamily('fable', ['claude-fable-5.1'], undefined),
+];
+
+/**
+ * 已知版本 → 对应 id;比已知最新版本还新 → undefined(400,不把没上的新模型静默换成旧的);
+ * 其余(没有版本号、更老的写法)→ 家族兜底。
+ */
+function mapClaudeFamily(lower: string, family: ClaudeFamily): string | undefined {
+  const version = claudeFamilyVersion(lower, family.name);
+  if (version === undefined) return family.fallback;
+  return family.versions.get(version) ?? (version > family.newest ? undefined : family.fallback);
+}
+
+/**
  * Map Claude / OpenAI model name to Kiro model ID.
  *
- * - sonnet 5/sonnet-5 -> claude-sonnet-5
- * - sonnet 4.6/4-6 -> claude-sonnet-4.6
- * - other sonnet -> claude-sonnet-4.5
- * - opus 5 -> claude-opus-5
- * - opus 4.5/4-5 -> claude-opus-4.5
- * - opus 4.7/4-7 -> claude-opus-4.7
- * - opus 4.8/4-8 -> claude-opus-4.8
- * - other opus -> claude-opus-4.6 (fallback)
- * - all haiku -> claude-haiku-4.5
- * - fable 5.1/5-1 -> claude-fable-5.1(其它 fable 版本上游没有 → undefined)
+ * - Claude:家族名(sonnet / opus / haiku / fable)+ 紧挨它的版本号查 `CLAUDE_FAMILIES`,见 `mapClaudeFamily`
  * - gpt … sol/terra/luna -> gpt-5.6-{sol,terra,luna}
  *
  * GPT-5.6（OpenAI，kiro-cli 2.12.1 起）走与 Claude **完全相同**的上游
@@ -140,41 +192,8 @@ export const DUPLICATE_TOOL_RESULT_TEXT =
 export function mapModel(model: string): string | undefined {
   const lower = model.toLowerCase();
 
-  if (lower.includes('sonnet')) {
-    // 'sonnet-5' 边界匹配: 'claude-sonnet-4-5' 含 'sonnet-4-5' 而非 'sonnet-5',不会误伤
-    if (lower.includes('sonnet-5')) {
-      return 'claude-sonnet-5';
-    }
-    if (lower.includes('4-6') || lower.includes('4.6')) {
-      return 'claude-sonnet-4.6';
-    }
-    return 'claude-sonnet-4.5';
-  }
-  if (lower.includes('opus')) {
-    // 'opus-5' 边界匹配: 'claude-opus-4-5' 含 'opus-4-5' 而非 'opus-5',不会误伤(上游 id 无小数点,须先于 4-x 判定)
-    if (lower.includes('opus-5')) {
-      return 'claude-opus-5';
-    }
-    if (lower.includes('4-5') || lower.includes('4.5')) {
-      return 'claude-opus-4.5';
-    }
-    if (lower.includes('4-7') || lower.includes('4.7')) {
-      return 'claude-opus-4.7';
-    }
-    if (lower.includes('4-8') || lower.includes('4.8')) {
-      return 'claude-opus-4.8';
-    }
-    return 'claude-opus-4.6';
-  }
-  if (lower.includes('haiku')) {
-    return 'claude-haiku-4.5';
-  }
-  if (lower.includes('fable')) {
-    // Kiro 只上了 5.1(Enterprise 预览,上游 id 有小数点,与 kiro.dev 模型清单一致);
-    // Fable 5 等其它版本不静默降级到 5.1
-    if (lower.includes('fable-5-1') || lower.includes('fable-5.1')) return 'claude-fable-5.1';
-    return undefined;
-  }
+  const family = CLAUDE_FAMILIES.find((f) => lower.includes(f.name));
+  if (family !== undefined) return mapClaudeFamily(lower, family);
   if (lower.includes('gpt')) {
     if (lower.includes('sol')) return 'gpt-5.6-sol';
     if (lower.includes('terra')) return 'gpt-5.6-terra';
