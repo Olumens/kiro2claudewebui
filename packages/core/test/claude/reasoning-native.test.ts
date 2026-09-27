@@ -231,9 +231,9 @@ describe('effectiveThinking / responseThinkingEnabled: 上游字段与响应侧�
     expect(effectiveThinking({ type: 'disabled' }, 'claude-opus-5')).toEqual({ type: 'disabled' });
   });
 
-  it('thinking 常开的 fable-5.1:disabled 也按 adaptive(上游照样思考)', () => {
-    expect(effectiveThinking({ type: 'disabled' }, 'claude-fable-5.1')?.type).toBe('adaptive');
-    expect(effectiveThinking(undefined, 'claude-fable-5.1')?.type).toBe('adaptive');
+  it('thinking 常开的 opus-5.5:disabled 也按 adaptive(上游 schema 只收 adaptive)', () => {
+    expect(effectiveThinking({ type: 'disabled' }, 'claude-opus-5.5')?.type).toBe('adaptive');
+    expect(effectiveThinking(undefined, 'claude-opus-5.5')?.type).toBe('adaptive');
   });
 
   it('非原生模型不做 thinking 控制,原样返回', () => {
@@ -246,7 +246,7 @@ describe('effectiveThinking / responseThinkingEnabled: 上游字段与响应侧�
   it('响应侧 thinking 通道:未提 thinking 的原生 Claude 必须开(否则 text block 抢在 thinking 前)', () => {
     expect(responseThinkingEnabled(undefined, 'claude-opus-5')).toBe(true);
     expect(responseThinkingEnabled({ type: 'disabled' }, 'claude-opus-5')).toBe(false);
-    expect(responseThinkingEnabled({ type: 'disabled' }, 'claude-fable-5-1')).toBe(true);
+    expect(responseThinkingEnabled({ type: 'disabled' }, 'claude-opus-5-5')).toBe(true);
     expect(responseThinkingEnabled(undefined, 'claude-opus-4-6')).toBe(false);
     expect(responseThinkingEnabled({ type: 'adaptive' }, 'claude-opus-4-6')).toBe(true);
   });
@@ -285,8 +285,8 @@ describe('usesNativeReasoning: 模型能力探测', () => {
         // 2026-09-19 抓包:schema 同 opus-5;sonnet-4.6 加字段后回明文 reasoning + signature
         'claude-sonnet-5',
         'claude-sonnet-4.6',
-        // Fable 5.1:thinking 常开、effort 五档
-        'claude-fable-5.1',
+        // 2026-09-27 ListAvailableModels:thinking 只有 adaptive、effort 五档默认 medium
+        'claude-opus-5.5',
         // GPT-5.6 系列走 additionalModelRequestFields.reasoning（内容加密不可 surface）
         'gpt-5.6-sol',
         'gpt-5.6-terra',
@@ -426,7 +426,7 @@ describe('convertRequest: 顶层 additionalModelRequestFields(effort 唯一生�
     });
   });
 
-  it('不传 thinking → 同 KAS 补模型 schema 默认(adaptive + 默认档位);非原生与 fable-5.1 不发', () => {
+  it('不传 thinking → 同 KAS 补模型 schema 默认(adaptive + 默认档位);非原生不发', () => {
     const opus47 = convertRequest(baseMessagesRequest({ model: 'claude-opus-4-7' }));
     expect(opus47.additionalModelRequestFields).toEqual({
       thinking: { type: 'adaptive' },
@@ -444,9 +444,9 @@ describe('convertRequest: 顶层 additionalModelRequestFields(effort 唯一生�
         .additionalModelRequestFields,
     ).toBeUndefined();
     expect(
-      convertRequest(baseMessagesRequest({ model: 'claude-fable-5-1' }))
+      convertRequest(baseMessagesRequest({ model: 'claude-opus-5-5' }))
         .additionalModelRequestFields,
-    ).toBeUndefined();
+    ).toEqual({ thinking: { type: 'adaptive' }, output_config: { effort: 'medium' } });
   });
 
   it('4.7 + thinking.type=disabled → {thinking:{type:disabled}}(真关,不是不发)', () => {
@@ -456,18 +456,30 @@ describe('convertRequest: 顶层 additionalModelRequestFields(effort 唯一生�
     });
   });
 
-  it('fable-5.1:adaptive + xhigh/max 原样;disabled → 不发字段(规格上 thinking 不可关,显式 disabled 400)', () => {
+  it('opus-5.5:adaptive + xhigh/max 原样;disabled → 按 adaptive 发(上游 schema 无 disabled,发了 400)', () => {
     const at = (effort: string) =>
-      convertRequest(baseMessagesRequest({ model: 'claude-fable-5-1', ...adaptive(effort) }))
+      convertRequest(baseMessagesRequest({ model: 'claude-opus-5-5', ...adaptive(effort) }))
         .additionalModelRequestFields;
     expect(at('xhigh')).toEqual({
       thinking: { type: 'adaptive' },
       output_config: { effort: 'xhigh' },
     });
     expect(at('max')).toEqual({ thinking: { type: 'adaptive' }, output_config: { effort: 'max' } });
-    const off = baseMessagesRequest({ model: 'claude-fable-5-1', thinking: { type: 'disabled' } });
-    expect(convertRequest(off).additionalModelRequestFields).toBeUndefined();
-    // 常开豁免只针对 fable:其它 Claude 原生模型 disabled 仍真关
+    const off = baseMessagesRequest({ model: 'claude-opus-5-5', thinking: { type: 'disabled' } });
+    expect(convertRequest(off).additionalModelRequestFields).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'medium' },
+    });
+    const offLow = baseMessagesRequest({
+      model: 'claude-opus-5-5',
+      thinking: { type: 'disabled' },
+      output_config: { effort: 'low' },
+    });
+    expect(convertRequest(offLow).additionalModelRequestFields).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'low' },
+    });
+    // 常开豁免只针对 opus-5.5:其它 Claude 原生模型 disabled 仍真关
     const opusOff = baseMessagesRequest({ model: 'claude-opus-5', thinking: { type: 'disabled' } });
     expect(convertRequest(opusOff).additionalModelRequestFields).toEqual({
       thinking: { type: 'disabled' },

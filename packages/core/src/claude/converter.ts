@@ -133,14 +133,14 @@ interface ClaudeFamily {
   readonly name: string;
   readonly versions: ReadonlyMap<number, string>;
   readonly newest: number;
-  readonly fallback: string | undefined;
+  readonly fallback: string;
 }
 
 /** 版本号由上游 id 自己解析;上游 id 有的带小数点有的不带(`claude-opus-5`),以 list-models 为准。 */
 function claudeFamily(
   name: string,
   upstreamIds: readonly string[],
-  fallback: string | undefined,
+  fallback: string,
 ): ClaudeFamily {
   const versions = new Map<number, string>();
   for (const id of upstreamIds) {
@@ -159,12 +159,17 @@ const CLAUDE_FAMILIES: readonly ClaudeFamily[] = [
   ),
   claudeFamily(
     'opus',
-    ['claude-opus-4.5', 'claude-opus-4.6', 'claude-opus-4.7', 'claude-opus-4.8', 'claude-opus-5'],
+    [
+      'claude-opus-4.5',
+      'claude-opus-4.6',
+      'claude-opus-4.7',
+      'claude-opus-4.8',
+      'claude-opus-5',
+      'claude-opus-5.5',
+    ],
     'claude-opus-4.6',
   ),
   claudeFamily('haiku', ['claude-haiku-4.5'], 'claude-haiku-4.5'),
-  // Kiro 只上了 5.1:Fable 5 等其它版本不静默换成 5.1
-  claudeFamily('fable', ['claude-fable-5.1'], undefined),
 ];
 
 /**
@@ -180,7 +185,7 @@ function mapClaudeFamily(lower: string, family: ClaudeFamily): string | undefine
 /**
  * Map Claude / OpenAI model name to Kiro model ID.
  *
- * - Claude:家族名(sonnet / opus / haiku / fable)+ 紧挨它的版本号查 `CLAUDE_FAMILIES`,见 `mapClaudeFamily`
+ * - Claude:家族名(sonnet / opus / haiku)+ 紧挨它的版本号查 `CLAUDE_FAMILIES`,见 `mapClaudeFamily`
  * - gpt … sol/terra/luna -> gpt-5.6-{sol,terra,luna}
  *
  * GPT-5.6（OpenAI，kiro-cli 2.12.1 起）走与 Claude **完全相同**的上游
@@ -221,7 +226,8 @@ export function mapModel(model: string): string | undefined {
  *   - opus-5 / 4.7 / 4.8:回摘要 reasoning 帧 + signature;
  *   - sonnet-5:回 signature 帧(文本可能为空),计费随 effort 变;
  *   - sonnet-4.6:schema 无 xhigh,加字段后回明文 reasoning + signature,默认不思考;
- *   - fable-5.1:thinking 常开(见 `MODELS_THINKING_ALWAYS_ON`),effort 五档齐全(按 Anthropic 规格);
+ *   - opus-5.5:schema 的 thinking 只有 adaptive(见 `MODELS_THINKING_ALWAYS_ON`),effort 五档、默认 medium,
+ *     reasoning 帧同 opus-5;
  *   - opus-4.6:发字段只涨计费、既无 reasoning 帧也无 signature,没有可回传的东西,不入集合;
  *   - 4.5 及以下 / haiku:无 schema。
  *
@@ -235,7 +241,7 @@ export const MODELS_WITH_NATIVE_REASONING: ReadonlySet<string> = new Set([
   'claude-opus-4.7',
   'claude-opus-4.8',
   'claude-sonnet-4.6',
-  'claude-fable-5.1',
+  'claude-opus-5.5',
   'gpt-5.6-sol',
   'gpt-5.6-terra',
   'gpt-5.6-luna',
@@ -245,10 +251,11 @@ export const MODELS_WITH_NATIVE_REASONING: ReadonlySet<string> = new Set([
 const MODELS_WITHOUT_XHIGH: ReadonlySet<string> = new Set(['claude-sonnet-4.6']);
 
 /**
- * thinking 不可关的模型:Anthropic 对显式 `{type:"disabled"}` 回 400,规格要求「省略参数」。
- * 客户端发 `disabled` 时不发任何字段、沿用上游默认(adaptive),而不是把必 400 的请求送上去。
+ * thinking 不可关的模型:上游 schema 的 `thinking.type` 只有 adaptive,显式 `{type:"disabled"}` 回 400
+ * `ValidationException`(2026-09-27 直打 opus-5.5)。客户端发 `disabled` 时按 adaptive 发,而不是把
+ * 必 400 的请求送上去。
  */
-const MODELS_THINKING_ALWAYS_ON: ReadonlySet<string> = new Set(['claude-fable-5.1']);
+const MODELS_THINKING_ALWAYS_ON: ReadonlySet<string> = new Set(['claude-opus-5.5']);
 
 /** 「是不是 GPT 家族」的唯一判定(入参是 mapped modelId):决定 wire 形态、context window 与加密 reasoning 路径。 */
 export function isGptModelId(mappedModelId: string): boolean {
@@ -256,11 +263,12 @@ export function isGptModelId(mappedModelId: string): boolean {
 }
 
 /**
- * KAS 在客户端没指定 effort 时发的档位 = 上游 `ListAvailableModels` 逐模型 schema 的 `default`
- * (2.23.1 实测:opus-4.7 为 xhigh,其余原生模型为 high)。fable-5.1 拿不到 schema,按 high。
+ * KAS 在客户端没指定 effort 时发的档位 = 上游 `ListAvailableModels` 逐模型 schema 的 `default`;
+ * 只列不是 high 的(2026-09-27 实测)。
  */
 const DEFAULT_EFFORT_BY_MODEL: ReadonlyMap<string, EffortLevel> = new Map([
   ['claude-opus-4.7', 'xhigh'],
+  ['claude-opus-5.5', 'medium'],
 ]);
 
 export function defaultEffort(mappedModelId: string | undefined): EffortLevel {
@@ -290,8 +298,8 @@ export function usesNativeReasoning(mappedModelId: string): boolean {
 }
 
 /**
- * 本轮实际生效的 thinking,同 KAS 的默认:原生模型未提 `thinking` 按 `adaptive`;thinking 常开的
- * 模型(fable-5.1)恒 `adaptive`——客户端 `disabled` 只是不发字段,上游照样思考;非原生模型不做
+ * 本轮实际生效的 thinking,同 KAS 的默认:原生模型未提 `thinking` 按 `adaptive`;
+ * `MODELS_THINKING_ALWAYS_ON` 恒 `adaptive`(客户端 `disabled` 也按 adaptive 发);非原生模型不做
  * thinking 控制,原样返回客户端的值。上游字段(`buildAdditionalModelRequestFields`)与响应侧
  * thinking 通道(`responseThinkingEnabled`)都由它推出,不得各算各的。
  */
@@ -323,7 +331,6 @@ export function responseThinkingEnabled(
  * `thinking` + `output_config` → 请求顶层 `additionalModelRequestFields`(effort 唯一生效的位置,
  * 形状见 `requests/kiro.ts`),按 `effectiveThinking`:
  *   - 非原生模型 → undefined(不发,沿用上游默认);
- *   - thinking 常开且无 schema 的 fable-5.1 → 只透传客户端显式的 adaptive,否则不发;
  *   - `disabled` → Claude `{thinking:{type:"disabled"}}` / GPT `{reasoning:{effort:"none"}}`;
  *   - `adaptive`(含未提时的默认)→ Claude `{thinking:{type:"adaptive", display?},
  *     output_config:{effort}}` / GPT `{reasoning:{effort}}`;sonnet-4.6 无 xhigh → 降 high。
@@ -333,8 +340,6 @@ export function buildAdditionalModelRequestFields(
   mappedModelId: string,
 ): AdditionalModelRequestFields | undefined {
   if (!usesNativeReasoning(mappedModelId)) return undefined;
-  if (MODELS_THINKING_ALWAYS_ON.has(mappedModelId) && req.thinking?.type !== 'adaptive')
-    return undefined;
   const thinking = effectiveThinking(req.thinking, mappedModelId);
   const isGpt = isGptModelId(mappedModelId);
   if (thinking?.type !== 'adaptive') {
@@ -377,7 +382,7 @@ const CLAUDE_MODELS_WITH_1M_CONTEXT: ReadonlySet<string> = new Set([
   'claude-opus-4.7',
   'claude-opus-4.8',
   'claude-opus-5',
-  'claude-fable-5.1',
+  'claude-opus-5.5',
 ]);
 
 /**
@@ -387,7 +392,7 @@ const CLAUDE_MODELS_WITH_1M_CONTEXT: ReadonlySet<string> = new Set([
  * Opus 4.7 and 4.8 also ship with the 1M window (上游 list-models 实测确认).
  * Opus 5 同为 1M context (上游 `--list-models` 实测: context_window_tokens 1000000).
  * Sonnet 5 同为 1M context (Anthropic 官方规格,与前代 Sonnet 4.6 一致).
- * Fable 5.1 同为 1M context (kiro.dev 模型文档 + Anthropic 官方规格).
+ * Opus 5.5 同为 1M context (上游 `ListAvailableModels` tokenLimits.maxInputTokens 1000000).
  * GPT-5.6 系列 2026-09-14 起为 1M context(上游 `--list-models` 实测: "1M context
  * window";此前为 272K),逐账号灰度,故可由 `KIRO2CLAUDE_GPT_CONTEXT_WINDOW` 覆盖。
  *

@@ -30,6 +30,9 @@
  * `below_threshold` (whole prompt too small to cache) stays pure input.
  * Kiro shows no separate cache-WRITE premium — UUID-clean first sends sit
  * on the plain k_in line — so writes need no extra term in the inversion.
+ * Exception: models in KIRO_BILLING bill non-read input at a premium over
+ * their base price (see there); the inversion generalizes to
+ *     T_eff = missPremium · T_nonread + KIRO_CACHE_READ_RATIO · T_cache_read
  *
  * The Anthropic protocol identity
  *     input_tokens + cache_creation_input_tokens + cache_read_input_tokens
@@ -49,8 +52,9 @@ export const KIRO_K_IN = 0.0556;
 export const KIRO_K_OUT = 0.6705;
 export const KIRO_OVERAGE_RATE = 0.04;
 /**
- * Kiro's cached-input price as a fraction of its own miss price — the
- * inversion divisor is (1 - this). Measured from same-prompt resend
+ * Kiro's cached-input price as a fraction of its base price — the
+ * inversion divisor is (missPremium - this), missPremium = 1 unless the
+ * model is in KIRO_BILLING. Measured from same-prompt resend
  * probes: round6 2026-07-02 opus-4.8 @37k = 0.52758 (two independent
  * anchor pairs, bit-reproducible) and sonnet-4.5 @24.6k = 0.52822;
  * round2/round5 2026-04 sonnet-4.5 @17.7k = 0.5264. Constant pinned to
@@ -155,8 +159,41 @@ const CLAUDE_PRICE_USD_PER_TOK: Record<string, ClaudePrice> = {
     cacheRead: 0.5e-6,
     cacheCreation: 6.25e-6,
   },
-  // claude-fable-5-1 故意不列:Kiro 标 6x,偏离上面各模型「倍率 / 输入单价 ≈ 0.44」的线,
-  // 按标价反演会低估 cache_read,故走 unknown_model 透传;要反演须先用真实 credit 标定。
+  // Opus 5.5:缓存命中 0.05×($0.20),不是通行的 0.1×。Kiro 计价偏离单价线,反演见 KIRO_BILLING
+  'claude-opus-5-5': {
+    in: 4e-6,
+    out: 20e-6,
+    cacheRead: 0.2e-6,
+    cacheCreation: 5e-6,
+  },
+};
+
+interface KiroBilling {
+  /** Kiro 基价(USD/token,与价格表同口径代入 k_in / k_out) */
+  in: number;
+  out: number;
+  /** 未命中输入 = missPremium × 基价;命中仍是 `_cacheReadRatio` × 基价 */
+  missPremium: number;
+}
+
+/**
+ * Kiro 按上游 rateMultiplier 计价(opus-5 / opus-5.5 同尺寸直打:命中与输出价 ∝ 倍率),基价 = k_in /
+ * k_out 标定线上 opus 的 $5 / $25 × 倍率 / 2.2。
+ */
+function kiroBilling(rateMultiplier: number, missPremium = 1): KiroBilling {
+  return { in: (5e-6 * rateMultiplier) / 2.2, out: (25e-6 * rateMultiplier) / 2.2, missPremium };
+}
+
+/**
+ * Anthropic 标价明显偏离 Kiro 倍率线的模型,反演改用这里的 Kiro 计价;价格表只管
+ * `claudeEquivalentCostUsd`。没列的模型直接用价格表单价反演:opus 系正在线上,sonnet-4.x 高 1.5%;haiku
+ * 按倍率线算高 10%,与 KIRO_CACHE_READ_RATIO 记录的 haiku 残差同向。实测证据与标定入口见 PITFALLS
+ * 「支持哪些模型」。
+ *
+ * - opus-5.5:2.0x,命中与输出按倍率缩放,未命中输入另加 1.942 倍基价。
+ */
+const KIRO_BILLING: Record<string, KiroBilling> = {
+  'claude-opus-5-5': kiroBilling(2.0, 1.9423),
 };
 
 /** Anthropic 最小可缓存前缀(prompt-caching 文档,各平台一致);随代际不单调。 */
@@ -170,6 +207,7 @@ const MODEL_CACHE_THRESHOLD: Record<string, number> = {
   'claude-opus-4-7': 2048,
   'claude-opus-4-8': 1024,
   'claude-opus-5': 512,
+  'claude-opus-5-5': 512,
 };
 
 /**
@@ -234,7 +272,7 @@ export interface DerivedUsageBreakdown {
 let _multiplier = 1.0;
 
 /**
- * Effective cache-read price ratio used as the inversion divisor `(1 - this)`.
+ * Effective cache-read price ratio in the inversion divisor `(missPremium - this)`.
  * Defaults to the MEASURED constant; overridable via `initCacheReadRatio`
  * (env `KIRO2CLAUDE_CACHE_READ_RATIO`) as an explicit display/policy knob.
  */
@@ -499,19 +537,21 @@ export function deriveKiroUsage(
     return passthroughBreakdown(inputTokensTotal, outputTokens, credits, cp, 'below_threshold');
   }
 
-  // Step 2: invert credits → effective uncached input
+  // Step 2: invert credits → effective uncached input (in base-price tokens)
+  const kiro = KIRO_BILLING[normalizedModel] ?? { in: cp.in, out: cp.out, missPremium: 1 };
   const kiroUsd = credits * KIRO_OVERAGE_RATE;
-  const kiroInputUsd = Math.max(0, kiroUsd - KIRO_K_OUT * cp.out * outputTokens);
-  const tEffIn = kiroInputUsd / (KIRO_K_IN * cp.in);
+  const kiroInputUsd = Math.max(0, kiroUsd - KIRO_K_OUT * kiro.out * outputTokens);
+  const tEffIn = kiroInputUsd / (KIRO_K_IN * kiro.in);
+  const allMiss = kiro.missPremium * inputTokensTotal;
 
   let cacheRead: number;
-  if (tEffIn >= inputTokensTotal) {
+  if (tEffIn >= allMiss) {
     cacheRead = 0;
   } else {
     // Divisor uses the runtime-effective ratio (measured default unless the
     // KIRO2CLAUDE_CACHE_READ_RATIO knob overrides it). _cacheReadRatio is
-    // constrained to [0, 1), so (1 - _cacheReadRatio) is always > 0.
-    const raw = (inputTokensTotal - tEffIn) / (1 - _cacheReadRatio);
+    // constrained to [0, 1) and missPremium ≥ 1, so the divisor is always > 0.
+    const raw = (allMiss - tEffIn) / (kiro.missPremium - _cacheReadRatio);
     // Round first, then clamp: clamping before rounding could let a fractional
     // cap round up past inputTokensTotal (harmless today — token counts are
     // integers — but this keeps cacheRead ≤ total unconditionally).

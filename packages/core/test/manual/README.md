@@ -23,6 +23,7 @@
 | `session-isolation-live.mjs` 💰 | 同一 `prompt_cache_key` 下全新会话不串、同键第二轮命中缓存、GPT / Claude 推理信封回传上游照收;见 PITFALLS「会话身份映射到 kiro-cli」 |
 | `session-concurrency-live.mjs` 💰 | 同一会话键下并发在途的串话检测:Messages(Claude Code 形态含 `x-claude-code-agent-id` subagent)/ Chat / Responses(Codex 子线程)四组同时开跑,埋暗号、问回、新对话同时在途 |
 | `cache-scope-probe.ts` 💰 | 直打上游,用 credits 反推缓存作用域:同 id 交替多段对话 / 插旁路请求 / 换 id / acid 相撞时是否命中;GPT 与 Claude 分别跑(`K2C_MODEL`) |
+| `claude-rate-probe.ts` 💰 | 新 Claude 模型接入 derived 前的标定,与已标定模型同尺寸对照(`K2C_MODELS`):`models` 拉上游 schema / 倍率(免费)、`wire` 看 thinking disabled 是否被拒与 reasoning 帧、`input` / `suffix` 测冷价斜率与命中价、`output` 测输出价。见 PITFALLS「支持哪些模型」 |
 | `gpt-cache-derive-live.mjs` 💰 | 走本地网关(override 模式)验 GPT 缓存反演:冷启动 / 续写 / 部分命中 / 长短输出 / 隐藏推理 / effort 切换 / sol × Responses,命中真值由构造给出;记录原文供离线用 o200k 数真实输出,拆开公式误差与输出估算误差。见 PITFALLS「GPT credit 锚定与缓存反演」 |
 | `inserted-content-live.mjs` 💰 | 中途插入内容的 7 种客户端形态各埋一个 nonce 打真实上游,看回复是否含 nonce |
 | `codex-subagent-{probe,lifecycle}-server.ts` | Codex multi-agent v2 信封与生命周期矩阵;见 `docs/PITFALLS.md`「Codex code mode」 |
