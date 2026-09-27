@@ -10,7 +10,8 @@
  *
  * 全部走 adaptive + effort low + omitted(thinking 不可关的模型也能同口径比);常数项(输出、
  * 推理、上游自带前缀)在斜率里抵消。`K2C_MODELS` 逗号分隔(上游 id),`K2C_REPS` 重复轮数,
- * `K2C_ONLY=models,wire,input,suffix,output` 挑阶段;结果追加到 /tmp/k2c-rate/rate.jsonl。
+ * `K2C_ONLY=models,wire,input,suffix,output` 挑阶段;结果追加到 /tmp/k2c-rate/rate.jsonl。记录里没有 credits
+ * 的多半是上游 `CONTENT_FILTERED`(sonnet-5 对 ≥30K 的随机串文档会拦,不计费),调小 `K2C_WORDS_*` 重跑。
  *
  * ```bash
  * cd packages/core && npx tsx --env-file-if-exists=../../.env test/manual/claude-rate-probe.ts

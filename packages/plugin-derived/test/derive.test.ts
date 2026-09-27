@@ -323,6 +323,45 @@ describe('deriveKiroUsage — unknown / thinking variants', () => {
 });
 
 // ============================================================================
+// Sonnet 5: 标价 $2/$10,Kiro 计价同 sonnet-4.6(KIRO_BILLING),2026-09-27 直打标定
+// ============================================================================
+
+describe('deriveKiroUsage — sonnet-5 (Kiro billing override)', () => {
+  // [total tokens (contextUsage), output tokens, credits]:同前缀第二轮
+  const WARM = [30744, 2, 0.06800008373134328] as const;
+
+  it('冷请求反演不出命中,同前缀第二轮几乎全命中', () => {
+    for (const [total, credits] of [
+      [14567, 0.060227251144278626],
+      [30730, 0.12643390122719736],
+    ]) {
+      expect(
+        deriveKiroUsage('claude-sonnet-5', total, 2, credits).cacheReadInputTokens,
+      ).toBeLessThan(total * 0.01);
+    }
+    const warm = deriveKiroUsage('claude-sonnet-5', ...WARM);
+    expect(warm.derived.estimatedCacheHitRatio).toBeGreaterThan(0.98);
+  });
+
+  it('成本按 Anthropic 标准价 $2 / $10:写入 $2.50、命中 $0.20', () => {
+    const out = deriveKiroUsage('claude-sonnet-5', ...WARM);
+    const expected =
+      out.inputTokens * 2e-6 +
+      out.cacheCreationInputTokens * 2.5e-6 +
+      out.cacheReadInputTokens * 0.2e-6 +
+      2 * 10e-6;
+    expect(out.derived.claudeEquivalentCostUsd).toBeCloseTo(expected, 12);
+  });
+
+  it('反演与 sonnet-4.6 同一套 Kiro 计价:同样的 credits 拆出同样的命中', () => {
+    // sonnet-4.6 不在 KIRO_BILLING,按价格表 $3 反演;两者只差 $3 与倍率线 5e-6×1.3/2.2 的 1.5%
+    const s5 = deriveKiroUsage('claude-sonnet-5', 52599, 2, 0.11457617522388061);
+    const s46 = deriveKiroUsage('claude-sonnet-4-6', 52599, 2, 0.11457617522388061);
+    expect(Math.abs(s5.cacheReadInputTokens - s46.cacheReadInputTokens)).toBeLessThan(52599 * 0.02);
+  });
+});
+
+// ============================================================================
 // Opus 5.5: Kiro 计价偏离单价线(KIRO_BILLING),2026-09-27 直打标定
 // ============================================================================
 // claude-rate-probe.ts:cold = 新前缀首发;warm = 同前缀第二轮;warm+new = 命中前缀 + 12K 新内容。

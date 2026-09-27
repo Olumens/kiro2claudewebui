@@ -119,12 +119,12 @@ const CLAUDE_PRICE_USD_PER_TOK: Record<string, ClaudePrice> = {
     cacheRead: 0.3e-6,
     cacheCreation: 3.75e-6,
   },
-  // 标准价 $3/$15;促销价 $2/$10 截至 2026-08-31,静态表按标准价避免到期后失真
+  // $2/$10 已转为标准价(原定 2026-09-01 涨到 $3/$15 取消);Kiro 计价仍同 sonnet-4.6,见 KIRO_BILLING
   'claude-sonnet-5': {
-    in: 3e-6,
-    out: 15e-6,
-    cacheRead: 0.3e-6,
-    cacheCreation: 3.75e-6,
+    in: 2e-6,
+    out: 10e-6,
+    cacheRead: 0.2e-6,
+    cacheCreation: 2.5e-6,
   },
   'claude-opus-4-5': {
     in: 5e-6,
@@ -177,7 +177,7 @@ interface KiroBilling {
 }
 
 /**
- * Kiro 按上游 rateMultiplier 计价(opus-5 / opus-5.5 同尺寸直打:命中与输出价 ∝ 倍率),基价 = k_in /
+ * Kiro 按上游 rateMultiplier 计价(opus / sonnet 同尺寸直打:同样的 token,credits ∝ 倍率),基价 = k_in /
  * k_out 标定线上 opus 的 $5 / $25 × 倍率 / 2.2。
  */
 function kiroBilling(rateMultiplier: number, missPremium = 1): KiroBilling {
@@ -190,9 +190,11 @@ function kiroBilling(rateMultiplier: number, missPremium = 1): KiroBilling {
  * 按倍率线算高 10%,与 KIRO_CACHE_READ_RATIO 记录的 haiku 残差同向。实测证据与标定入口见 PITFALLS
  * 「支持哪些模型」。
  *
+ * - sonnet-5:1.3x,Kiro 计价与 sonnet-4.6 逐项相同;标价降到 $2/$10 后离开倍率线。
  * - opus-5.5:2.0x,命中与输出按倍率缩放,未命中输入另加 1.942 倍基价。
  */
 const KIRO_BILLING: Record<string, KiroBilling> = {
+  'claude-sonnet-5': kiroBilling(1.3),
   'claude-opus-5-5': kiroBilling(2.0, 1.9423),
 };
 
