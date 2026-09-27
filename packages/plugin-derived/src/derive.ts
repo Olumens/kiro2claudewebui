@@ -409,9 +409,11 @@ const GPT_RATE_MULTIPLIER = { sol: 4.4, terra: 2.2, luna: 1.1 } as const;
  *
  *     C = (GPT_K_IN · (T − v) + GPT_K_OUT · v − credits / 倍率) / ((1 − 0.1) · GPT_K_IN)
  *
- * 截到 `[0, T − v]`。推理把真实 credits 抬高 → 这里把它当成未命中输入 → C 只会**低估**,
- * 不会虚报命中。Codex 长会话回放:effort=low 命中 95.9–99.6%、high 85.5–97.8%(同会话上一请求
- * 总量为近似真值),首个冷请求反演 ≈ 0。
+ * 截到 `[0, T − v]`。推理把真实 credits 抬高 → 这里把它当成未命中输入 → C 只会**低估**。
+ * v 的误差放大 `(GPT_K_OUT / GPT_K_IN − 1) / 0.9 ≈ 6.3` 倍:v 估多 Δ 就虚报约 6.3Δ 的命中
+ * (v 来自 core 的 `kiro.outputTokens`,端到端验收见 PITFALLS「GPT credit 锚定与缓存反演」)。
+ * Codex 长会话回放:effort=low 命中 95.9–99.6%、high 85.5–97.8%(同会话上一请求总量为近似
+ * 真值),首个冷请求反演 ≈ 0。
  *
  * 上报沿用 Claude 路径的恒等式 `input + cache_creation + cache_read == T`:OpenAI 的缓存没有
  * 写入溢价,cache_creation 恒 0,未命中部分(含输出)记 input。成本不按单价重算:credits 本身

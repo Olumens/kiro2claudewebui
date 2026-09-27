@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { eventFromFrame } from '../../src/kiro/model/events/base.js';
 import { parseFrame } from '../../src/kiro/parser/frame.js';
+import { seededDoc } from './_harness.mjs';
 import { createRealUpstream } from './_real-provider.js';
 
 type Obj = Record<string, unknown>;
@@ -49,18 +50,6 @@ async function send(body: Obj): Promise<Result> {
     s.status = `error:${(e as Error).message.slice(0, 200)}`;
   }
   return s;
-}
-
-/** 确定性伪随机文本:同 seed 同文本,不同 seed 之间没有公共前缀。 */
-function prefix(words: number, seed: number): string {
-  let x = seed;
-  const out: string[] = [`[document ${seed}]`];
-  for (let i = 0; i < words; i++) {
-    x = (x * 1103515245 + 12345) & 0x7fffffff;
-    out.push(`w${x % 99991}`);
-    if (i % 40 === 39) out.push('\n');
-  }
-  return out.join(' ');
 }
 
 const MODEL = process.env.K2C_MODEL ?? 'gpt-5.6-luna';
@@ -118,7 +107,7 @@ async function step(scenario: string, label: string, b: Obj): Promise<Result> {
 
 const sid = () => `sess_${randomUUID()}`;
 let seed = Number.parseInt(RUN.slice(0, 6), 16);
-const doc = () => prefix(WORDS, ++seed);
+const doc = () => seededDoc(WORDS, ++seed);
 
 const ONLY = new Set((process.env.K2C_ONLY ?? 'S1,S2,S3,S4,S5').split(','));
 

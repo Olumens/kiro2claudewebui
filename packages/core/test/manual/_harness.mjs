@@ -44,6 +44,18 @@ export const seqPrompt = (from, to) =>
   `Output the integers from ${from} to ${to} separated by ", " (comma space). ` +
   'Output ONLY the numbers, no prose, no markdown, no code fence.';
 
+/** 确定性伪随机文本:同 seed 同文本,不同 seed 之间没有公共前缀(缓存探针的命中真值靠它)。 */
+export function seededDoc(words, seed) {
+  let x = seed;
+  const out = [`[document ${seed}]`];
+  for (let i = 0; i < words; i++) {
+    x = (x * 1103515245 + 12345) & 0x7fffffff;
+    out.push(`w${x % 99991}`);
+    if (i % 40 === 39) out.push('\n');
+  }
+  return out.join(' ');
+}
+
 // ---------------------------------------------------------------------------
 // 请求
 // ---------------------------------------------------------------------------

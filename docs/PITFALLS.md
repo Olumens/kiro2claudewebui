@@ -156,9 +156,11 @@ code mode 的 `additional_tools` 里**没有** `web_search`(`tools.web_search=tr
 
 Kiro 不在 usage 里给缓存字段,折扣只落在 credits 上。GPT 的计费公式可以精确标定(2026-09-23,effort=none + 单词输出直打 V3 target):`credits = 倍率 × [k_in·(未命中 + 0.1·命中) + k_out·输出]`,`k_in = 1.6584e-5`、`k_out/k_in = 6.66`(公开价 $1.5 / $10 同比),倍率 = rateMultiplier(sol 4.4 / terra 2.2 / luna 1.1,三者逐点吻合)。缓存价恰为冷价的 0.1×;命中 = 同 conversationId 里此前请求的前缀(另有约 7 token 固定尾巴不进缓存;同一 id 下多段前缀互不挤占,见「会话身份映射到 kiro-cli」);**换 conversationId 发同样内容 credit 与冷请求逐位相同**——每请求随机 id 时测不到任何缓存。
 
-plugin-derived 据此反演(`gptCacheDerivedBreakdown`):按隐藏推理 = 0 解命中数,推理成本被计入未命中输入,所以 `cache_read` 只低估不虚报(Codex 长会话回放:effort=low 命中 95.9–99.6%,high 85.5–97.8%;冷请求 ≈ 0)。成本仍锚定 `credits×0.04`(× multiplier),status 保持 `gpt_credit_anchored`。**绝不给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`**:Claude 的系数与缓存比例(0.5276)和 GPT 不同,分流必须在价格表查询**前**。
+plugin-derived 据此反演(`gptCacheDerivedBreakdown`):按隐藏推理 = 0 解命中数,推理成本被计入未命中输入,所以推理只会让 `cache_read` 低估(Codex 长会话回放:effort=low 命中 95.9–99.6%,high 85.5–97.8%;冷请求 ≈ 0)。成本仍锚定 `credits×0.04`(× multiplier),status 保持 `gpt_credit_anchored`。**绝不给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`**:Claude 的系数与缓存比例(0.5276)和 GPT 不同,分流必须在价格表查询**前**。
 
 - **`kiro.inputTokens` 含本次输出**:contextUsage 百分比是生成之后的上下文占用,数到 100 / 1600 的对照里「输入」随输出长度增长,Claude 与 GPT 相同。GPT 反演已按此处理(先减可见输出);网关对所有模型上报的 `input_tokens` 目前都包含输出。
+- **端到端验收**(2026-09-24,`test/manual/gpt-cache-derive-live.mjs` 走本地网关,命中真值由构造给出):把 o200k 数出的真实输出代入公式,7.6K–62K 前缀、部分命中、3.8K 输出、luna / sol、Chat / Responses 的误差恒为约 −24 token(续写边界的固定尾巴,与规模无关),credits 预测残差 < 1%——公式与常数成立,o200k 与上游计数一致。网关的误差全在可见输出 v:`estimateOutputTokens` 是字符启发式,对 GPT 偏差大(数字串估 1723、实为 3800;150 词短文估 287、实为 181),经 `(k_out/k_in − 1)/0.9 ≈ 6.3` 倍放大——估少则少报(续写 + 长输出少报 13K),**估多则虚报**(冷请求报出 642 命中,真值 0)。隐藏推理同理低估约 6.3×推理 token(实测约 32 个推理 token → −225)。
+- **同会话切换 effort 让 GPT 缓存失效**:none → medium 的续写 credits 与冷请求逐位相同,两轮都 medium 则正常命中。反演据 credits 报 0 是对的;Codex 同一线程 effort 不变,不受影响。
 
 ## 错误流转 · 容量事件诊断
 

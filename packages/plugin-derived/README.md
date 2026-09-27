@@ -14,7 +14,7 @@ GPT-5.6(sol/terra/luna 及 Codex 别名)走 `deriveKiroUsage` 顶部的**专属�
 credits = 倍率 × [ GPT_K_IN · (未命中 + 0.1 · 命中) + GPT_K_OUT · 输出 ]
 ```
 
-2026-09 直打标定:缓存价恰为冷价的 0.1×、命中 = 同 conversationId 里此前请求的前缀、换 conversationId 不命中;倍率即上游 rateMultiplier(sol 4.4 / terra 2.2 / luna 1.1)。隐藏的推理 token 无法观测,按 0 解,因此 `cache_read` 只会**低估**不会虚报;`cache_creation` 恒 0(OpenAI 缓存没有写入溢价)。成本不按单价重算,仍锚定 `credits × KIRO_OVERAGE_RATE`(× multiplier),`derivedStatus = 'gpt_credit_anchored'`。**切勿给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`**——Claude 的系数与缓存比例和 GPT 不同。常数与证据见 `src/derive.ts` 的 `gptCacheDerivedBreakdown` 头注释。
+2026-09 直打标定:缓存价恰为冷价的 0.1×、命中 = 同 conversationId 里此前请求的前缀、换 conversationId 不命中;倍率即上游 rateMultiplier(sol 4.4 / terra 2.2 / luna 1.1)。隐藏的推理 token 无法观测,按 0 解,推理只会让 `cache_read` **低估**;可见输出由 core 估算,估多 Δ 会虚报约 6.3Δ(2026-09-24 端到端验收见 docs/PITFALLS.md「GPT credit 锚定与缓存反演」);`cache_creation` 恒 0(OpenAI 缓存没有写入溢价)。成本不按单价重算,仍锚定 `credits × KIRO_OVERAGE_RATE`(× multiplier),`derivedStatus = 'gpt_credit_anchored'`。**切勿给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`**——Claude 的系数与缓存比例和 GPT 不同。常数与证据见 `src/derive.ts` 的 `gptCacheDerivedBreakdown` 头注释。
 
 ## 依赖
 
