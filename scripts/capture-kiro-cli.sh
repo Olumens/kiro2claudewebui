@@ -226,9 +226,10 @@ MOCK_URL="http://127.0.0.1:$PORT"
 # ---------------------------------------------------------------------------
 # 2) KAS:环境变量把 runtime + control plane 都指向 mock
 # ---------------------------------------------------------------------------
+# `--model auto` 与 mock 的 MOCK_MODEL 一致:不写则 KAS 用本机 `chat.defaultModel`,fixture 随机器设置漂移
 echo "→ 触发 chat --v3 --no-interactive (捕获 KAS 的 GenerateAssistantResponse / InvokeMCP 等)"
 (cd "$WORKDIR" && KIRO_KAS_ENDPOINT="$MOCK_URL" KIRO_KAS_CONTROL_PLANE_ENDPOINT="$MOCK_URL" \
-  "$KIRO2CLAUDE_CLI_BIN" chat --v3 --no-interactive --trust-tools= "ping" >/dev/null 2>&1) || true
+  "$KIRO2CLAUDE_CLI_BIN" chat --v3 --no-interactive --model auto --trust-tools= "ping" >/dev/null 2>&1) || true
 
 # ---------------------------------------------------------------------------
 # 3) Rust 外壳:临时 settings 覆盖,录它的 UA
