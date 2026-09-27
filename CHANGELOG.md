@@ -1,3 +1,10 @@
+## [1.10.1](https://github.com/yupanzi/kiro2claude/compare/v1.10.0...v1.10.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* 额度耗尽统一回 402,修正模型映射、opus-5.5 effort 与 derived 计价口径 ([90927a8](https://github.com/yupanzi/kiro2claude/commit/90927a8db011be07041fe2a728f3b1a1ab19858f))
+
 # [1.10.0](https://github.com/yupanzi/kiro2claude/compare/v1.9.0...v1.10.0) (2026-09-27)
 
 
