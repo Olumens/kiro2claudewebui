@@ -1,3 +1,18 @@
+# [1.10.0](https://github.com/yupanzi/kiro2claude/compare/v1.9.0...v1.10.0) (2026-09-27)
+
+
+### Bug Fixes
+
+* **core:** 模型映射按版本号精确匹配,不再把新版本静默换成旧模型 ([c083a1e](https://github.com/yupanzi/kiro2claude/commit/c083a1e80992174dc5ba9b290c88723f73066f77))
+* **kiro:** 升 kiro-cli fixture 到 2.24.1 ([0dc9694](https://github.com/yupanzi/kiro2claude/commit/0dc96948f4423947eaafa34dd952f8712e400a4d))
+* **openai:** 缓存命中经 cached_tokens 上报,不再恒为 0 ([4acc7f2](https://github.com/yupanzi/kiro2claude/commit/4acc7f21dcb478d96c34a89aa28784185d91e9aa))
+* **plugin-derived:** sonnet-5 按 $2/$10 标准价计成本,反演改按 Kiro 倍率 ([56677fa](https://github.com/yupanzi/kiro2claude/commit/56677faa4c30f437a8d79ebd9b47bd972c820c06))
+
+
+### Features
+
+* **core:** 支持 claude-opus-5.5,移除 Fable 系列 ([8a4e1c6](https://github.com/yupanzi/kiro2claude/commit/8a4e1c61048b0e8ac7ce5c11f051a42a6a8a1b58))
+
 # [1.9.0](https://github.com/yupanzi/kiro2claude/compare/v1.8.0...v1.9.0) (2026-09-23)
 
 
