@@ -40,10 +40,11 @@ export function buildChatCompletion(args: {
   model: string;
   promptTokens: number;
   completionTokens: number;
-  cachedTokens?: number;
+  /** 必传:漏传即缓存命中恒 0(4acc7f2 修过的 bug),交给编译器兜 */
+  cachedTokens: number;
   extensions?: ReadonlyMap<string, unknown>;
 }): ChatCompletion {
-  const { reduced, model, promptTokens, completionTokens, cachedTokens = 0, extensions } = args;
+  const { reduced, model, promptTokens, completionTokens, cachedTokens, extensions } = args;
 
   // Claude 明文 reasoning(reasoningText)或 legacy <thinking>(thinkingText)→
   // reasoning_content;GPT 加密 reasoning 时两者皆空 → 省略该字段。

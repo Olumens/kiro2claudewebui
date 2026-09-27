@@ -9,7 +9,7 @@ import type { Event, KiroMeteringData } from '../kiro/model/events/base.js';
 import { type HookBus, UsageFinishEventImpl } from '../plugin-host/index.js';
 import { getLogger } from '../shared/logger.js';
 import { getRequestContext } from '../shared/request-context.js';
-import { clientModelHasEncryptedReasoning, resolveContextUsage } from './converter.js';
+import { clientModelHasEncryptedReasoning, mapModel, resolveContextUsage } from './converter.js';
 import {
   type LegacyThinkingBoundaryReason,
   LegacyThinkingDecoder,
@@ -37,7 +37,7 @@ export interface ClaudeUsagePayload {
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
   output_tokens: number;
-  // Plugins are free to inject namespaced extension fields (e.g. `kiro_usage`,
+  // Plugins are free to inject namespaced extension fields (e.g. `kiro_metering`,
   // `kiro_derived`). Core never references these by name.
   [key: string]: unknown;
 }
@@ -70,22 +70,30 @@ export function resolvePluginUsageExtensions(
  * OpenAI 两协议只取这一项、映射成 `cached_tokens`（输入总量的子集）；`input_tokens` 覆写
  * 不取，prompt_tokens 仍是总量（踩坑「OpenAI prompt_tokens」）。它是标准字段、不带后端
  * 身份，`/api/*` 镜像同样保留（与 `buildClaudeUsagePayload` 的 override 一致）。
+ * 契约只保证覆写值是有限数,这里夹到 `[0, promptTokens]`,子集关系由出口兜住。
  */
-export function resolveCacheReadTokens(hookEvent: UsageFinishEventImpl | undefined): number {
-  return hookEvent?.getOverrides().get('cache_read_input_tokens') ?? 0;
+export function resolveCacheReadTokens(
+  hookEvent: UsageFinishEventImpl | undefined,
+  promptTokens: number,
+): number {
+  const override = hookEvent?.getOverrides().get('cache_read_input_tokens') ?? 0;
+  return Math.min(Math.max(override, 0), Math.max(promptTokens, 0));
 }
 
 /**
  * 把 plugin 扩展命名空间字段并入 usage 对象。Claude（`buildClaudeUsagePayload`）与
  * OpenAI 两协议的 usage builder 共用此单一实现，杜绝「spread extensions onto usage」
- * 逻辑三份漂移。`undefined`（镜像端点剥离态）= 空操作。
+ * 逻辑三份漂移。`undefined`（镜像端点剥离态）= 空操作。与 usage 已有字段同名的命名空间
+ * 跳过:改标准字段只能走 `overrideStandardField`,扩展不能借名覆盖。
  */
 export function mergeUsageExtensions(
   target: Record<string, unknown>,
   extensions: PluginUsageExtensions | undefined,
 ): void {
   if (!extensions) return;
-  for (const [namespace, value] of extensions) target[namespace] = value;
+  for (const [namespace, value] of extensions) {
+    if (!Object.hasOwn(target, namespace)) target[namespace] = value;
+  }
 }
 
 /**
@@ -125,6 +133,9 @@ export function buildClaudeUsagePayload(args: {
  *
  * `eventCounts`:本次尝试的上游事件分布,仅用于判定 `kiro.meteringMissing`
  * (上游已扣费但账目丢失,定义与理由见 `isMeteringLost`)。
+ *
+ * `kiro.pricedModel` 是 `mapModel` 映射后的上游 id(上游按它计费),`event.model` 才是客户端原名:
+ * 计价插件若自己归一客户端名,`[1m]` / provider 前缀 / 大小写等 core 认得的写法会落到未知模型。
  */
 export function buildKiroUsageFinishEvent(args: {
   model: string;
@@ -143,7 +154,7 @@ export function buildKiroUsageFinishEvent(args: {
       'kiro.inputTokens': args.inputTokens,
       'kiro.outputTokens': args.outputTokens,
       'kiro.creditsUsed': args.kiroMetering?.usage,
-      'kiro.pricedModel': args.model,
+      'kiro.pricedModel': mapModel(args.model) ?? args.model,
       'kiro.upstreamRaw': args.kiroMetering,
       'kiro.meteringMissing': isMeteringLost(args.kiroMetering, args.eventCounts),
     },

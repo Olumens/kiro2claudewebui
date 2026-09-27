@@ -9,9 +9,10 @@ interface RegisteredHook {
 
 /**
  * HookBus collects plugin-registered handlers and invokes them sequentially
- * during wire finalization. Sequential (not parallel) because plugins may
- * read metadata written by earlier hooks (a later hook can read what an
- * earlier hook wrote).
+ * during wire finalization, in registration order (= the loader's dependsOn
+ * topological order). Sequential so that order is deterministic: for the same
+ * extension namespace the later hook's write wins, and conflicting standard
+ * field overrides are attributed in order.
  */
 export class HookBus {
   readonly #usageFinish: RegisteredHook[] = [];

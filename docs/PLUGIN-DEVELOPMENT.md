@@ -13,6 +13,9 @@
 {
   "name": "my-plugin",
   "type": "module",
+  "main": "./dist/index.js",
+  "exports": { ".": { "import": "./dist/index.js" } },
+  "scripts": { "build": "tsc -p tsconfig.json" },
   "keywords": ["kiro2claude-plugin"],
   "dependencies": {
     "@kiro2claude/plugin-api": "workspace:*"
@@ -43,13 +46,17 @@ class MyPlugin extends BasePlugin {
 export default new MyPlugin();
 ```
 
-带上 `kiro2claude-plugin` keyword 的包,会被 host 的 loader 自动发现。
+再把它加进 `packages/core/package.json` 的 `dependencies`(`"my-plugin": "workspace:*"`)、`pnpm install`、build。loader 经包名 `import`,入口取 `exports` / `main`,没 build 就加载不到(失败只打 warn,见下节)。
 
 ## 发现机制
 
-core 启动时扫描 **`node_modules/**`** —— 任何 `package.json` 带 `kiro2claude-plugin` keyword 的包都会被发现。内置的 first-party 插件(`metering` / `derived`)是 `@kiro2claude/core` 的依赖,因此进 `node_modules`、走同一条路径被发现,与第三方插件无区别。
+core 启动时只扫描 core 所在的那一个 `node_modules`(开发态 `packages/core/node_modules`,镜像 `/app/node_modules`)的第一层与 `@scope/` 下一层,不递归;`package.json` 带 `kiro2claude-plugin` keyword 的包按包名 `import`。内置插件(`metering` / `derived`)是 `@kiro2claude/core` 的依赖,走同一条路径被发现,与第三方插件无区别。`KIRO2CLAUDE_PLUGIN_ROOT` 可以换扫描根,但 `import` 仍从 core 自身的位置解析,插件包必须装在 core 解析得到的 `node_modules` 里。
 
-加载失败的插件会被隔离:host 打一条 warn 日志并继续加载其余插件。core 的 `/claude/v1/*` 始终可用。
+失败隔离到单个插件:import 失败、没有合法默认导出、`apiVersion` 不符、`register()` 抛错,都是打 warn、跳过该插件、其余照常,core 自身的路由始终可用。三个例外:
+
+- `dependsOn` 成环:整次发现失败,打 error,**所有**插件(含内置)都不加载
+- `dependsOn` 指向没被发现的插件:只打 warn,依赖方照常加载
+- `register()` 中途抛错:抛错前已注册的 hook / 路由不回滚
 
 ## 契约面
 
@@ -96,7 +103,7 @@ interface HookRegistrar {
 }
 ```
 
-`onUsageFinish` 在每次响应定稿时触发一次——上游流式结束后、core 写出 wire payload 之前。插件可读取 meta 键并改写 usage payload。
+`onUsageFinish` 在每次上游响应结束时至多触发一次,在 core 写出 wire usage 之前,插件可读取 meta 键并改写 usage。上游中途报错时,只要已经收到计量帧(流式另含已向客户端提交的情况)也会触发,好让计量插件记账,此时的改写不会上 wire。多个插件按注册顺序(`dependsOn` 拓扑序)依次执行;handler 抛错由 host 捕获,打 warn 后跳过,不影响响应。
 
 ### Meta 键
 
@@ -104,10 +111,10 @@ core 把这些约定键写入每个 `UsageFinishEvent`。插件用 `event.getMet
 
 | 键 | 类型 | 说明 |
 |---|---|---|
-| `kiro.inputTokens` | number | 计费用的最终 token 数 |
-| `kiro.outputTokens` | number | |
-| `kiro.creditsUsed` | number? | 原始 kiro credit 值(`meteringUsage`) |
-| `kiro.pricedModel` | string | 供计价类插件查询价格表的模型 id |
+| `kiro.inputTokens` | number | 最终输入 token 数:上游 contextUsage 还原值(含本轮输出),拿不到时为本地估算,见 `event.inputTokensSource` |
+| `kiro.outputTokens` | number | 可见输出的本地估算 |
+| `kiro.creditsUsed` | number? | 上游 `meteringEvent` 帧的 `usage`(credit) |
+| `kiro.pricedModel` | string | 上游实际计费的模型 id(core `mapModel` 映射后,如 `claude-opus-4.6` / `gpt-5.6-sol`);客户端原名见 `event.model` |
 | `kiro.upstreamRaw` | unknown? | 完整上游计量 payload,给高级插件 |
 | `kiro.meteringMissing` | boolean | 上游**已扣费**但计量帧没到 → `creditsUsed` 为空却确实花了钱 |
 
@@ -125,11 +132,12 @@ core 把这些约定键写入每个 `UsageFinishEvent`。插件用 `event.getMet
 
 ```ts
 // 给 usage payload 加一个带命名空间的扩展字段。
-// 命名空间所有权制:不会与其它插件的命名空间冲突。
+// host 不裁决归属:同一 namespace 多次写入(含不同插件)后写覆盖,请用插件专属或厂商前缀的名字。
+// 与 usage 已有字段同名(input_tokens、OpenAI 的 prompt_tokens_details 等)的 namespace 被忽略。
 event.addExtension('my_namespace', { /* ... */ });
 
-// 覆写一个 Anthropic 标准 usage 字段。
-// 若两个插件覆写同一字段,host 打 warn 日志。
+// 覆写一个 Anthropic 标准 usage 字段,改标准字段只能走这里。
+// 若两个插件覆写同一字段,host 打 warn 日志(带双方的 reason)。
 event.overrideStandardField('input_tokens', 1234, 'reason for override');
 ```
 
@@ -141,7 +149,7 @@ event.overrideStandardField('input_tokens', 1234, 'reason for override');
 
 - `'http-direct'` —— HTTP 直发路径(Claude 与 OpenAI 两个协议的端点都是)
 
-OpenAI 端点并入 `addExtension` 的扩展;`overrideStandardField` 只取 `cache_read_input_tokens`,映射成 `cached_tokens`(Chat `prompt_tokens_details`、Responses `input_tokens_details`),其余覆写不套(`prompt_tokens` 语义是输入总量,缓存是它的子集);`/api/*` 去泄漏镜像照常触发 hook,扩展字段不上 wire,`cached_tokens` 是标准字段、照常保留。
+OpenAI 端点并入 `addExtension` 的扩展;`overrideStandardField` 只取 `cache_read_input_tokens`,夹到 `[0, 输入总量]` 后映射成 `cached_tokens`(Chat `prompt_tokens_details`、Responses `input_tokens_details`),其余覆写不套(`prompt_tokens` 语义是输入总量,缓存是它的子集);`/api/*` 去泄漏镜像照常触发 hook,扩展字段不上 wire,`cached_tokens` 是标准字段、照常保留。
 
 `event.inputTokensSource` 报告输入 token 的可靠性:
 
@@ -150,7 +158,7 @@ OpenAI 端点并入 `addExtension` 的扩展;`overrideStandardField` 只取 `cac
 
 ## 契约的版本管理
 
-`@kiro2claude/plugin-api` 遵循 semver。插件声明 `apiVersion: '1.x'` 以接入整条 1.x 线。host 拒绝大版本不匹配的插件。
+`@kiro2claude/plugin-api` 遵循 semver。插件声明 `apiVersion: '1.x'` 以接入整条 1.x 线。host 注册前用 `assertApiVersion` 校验,只接受字面量 `'1.x'`,其它取值跳过该插件。
 
 当 2.0 落地(破坏性变更)时,适配后把插件的 `apiVersion` 改为 `'2.x'`。
 

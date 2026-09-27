@@ -33,6 +33,10 @@
  * Exception: models in KIRO_BILLING bill non-read input at a premium over
  * their base price (see there); the inversion generalizes to
  *     T_eff = missPremium · T_nonread + KIRO_CACHE_READ_RATIO · T_cache_read
+ * The premium applies to prompt input only: `inputTokensTotal` also contains
+ * this turn's output (true for every model), which is billed at the output
+ * rate, so the all-miss baseline is `missPremium · (T − v) + v` with v the
+ * visible-output estimate. For missPremium = 1 this is plain T.
  *
  * The Anthropic protocol identity
  *     input_tokens + cache_creation_input_tokens + cache_read_input_tokens
@@ -84,7 +88,8 @@ export const KIRO_OVERAGE_RATE = 0.04;
  * wire numbers from what upstream actually billed. It cannot exceed the real
  * aggregate ceiling (~87.7% on typical traffic — cold-start input can
  * never enter the cache_read numerator), and values ≥1 are rejected
- * (divisor `1 - ratio` would hit zero / go negative). Leave it unset to keep
+ * (divisor `missPremium - ratio` would hit zero / go negative for
+ * missPremium = 1 models). Leave it unset to keep
  * the faithful, measurement-backed inversion.
  */
 export const KIRO_CACHE_READ_RATIO = 0.5276;
@@ -100,73 +105,103 @@ interface ClaudePrice {
   cacheCreation: number;
 }
 
-const CLAUDE_PRICE_USD_PER_TOK: Record<string, ClaudePrice> = {
-  'claude-haiku-4-5': {
-    in: 1e-6,
-    out: 5e-6,
-    cacheRead: 0.1e-6,
-    cacheCreation: 1.25e-6,
-  },
-  'claude-sonnet-4-5': {
-    in: 3e-6,
-    out: 15e-6,
-    cacheRead: 0.3e-6,
-    cacheCreation: 3.75e-6,
-  },
-  'claude-sonnet-4-6': {
-    in: 3e-6,
-    out: 15e-6,
-    cacheRead: 0.3e-6,
-    cacheCreation: 3.75e-6,
-  },
+const CLAUDE_PRICE_USD_PER_TOK: ReadonlyMap<string, ClaudePrice> = new Map([
+  [
+    'claude-haiku-4-5',
+    {
+      in: 1e-6,
+      out: 5e-6,
+      cacheRead: 0.1e-6,
+      cacheCreation: 1.25e-6,
+    },
+  ],
+  [
+    'claude-sonnet-4-5',
+    {
+      in: 3e-6,
+      out: 15e-6,
+      cacheRead: 0.3e-6,
+      cacheCreation: 3.75e-6,
+    },
+  ],
+  [
+    'claude-sonnet-4-6',
+    {
+      in: 3e-6,
+      out: 15e-6,
+      cacheRead: 0.3e-6,
+      cacheCreation: 3.75e-6,
+    },
+  ],
   // $2/$10 已转为标准价(原定 2026-09-01 涨到 $3/$15 取消);Kiro 计价仍同 sonnet-4.6,见 KIRO_BILLING
-  'claude-sonnet-5': {
-    in: 2e-6,
-    out: 10e-6,
-    cacheRead: 0.2e-6,
-    cacheCreation: 2.5e-6,
-  },
-  'claude-opus-4-5': {
-    in: 5e-6,
-    out: 25e-6,
-    cacheRead: 0.5e-6,
-    cacheCreation: 6.25e-6,
-  },
-  'claude-opus-4-6': {
-    in: 5e-6,
-    out: 25e-6,
-    cacheRead: 0.5e-6,
-    cacheCreation: 6.25e-6,
-  },
-  'claude-opus-4-7': {
-    in: 5e-6,
-    out: 25e-6,
-    cacheRead: 0.5e-6,
-    cacheCreation: 6.25e-6,
-  },
-  'claude-opus-4-8': {
-    in: 5e-6,
-    out: 25e-6,
-    cacheRead: 0.5e-6,
-    cacheCreation: 6.25e-6,
-  },
+  [
+    'claude-sonnet-5',
+    {
+      in: 2e-6,
+      out: 10e-6,
+      cacheRead: 0.2e-6,
+      cacheCreation: 2.5e-6,
+    },
+  ],
+  [
+    'claude-opus-4-5',
+    {
+      in: 5e-6,
+      out: 25e-6,
+      cacheRead: 0.5e-6,
+      cacheCreation: 6.25e-6,
+    },
+  ],
+  [
+    'claude-opus-4-6',
+    {
+      in: 5e-6,
+      out: 25e-6,
+      cacheRead: 0.5e-6,
+      cacheCreation: 6.25e-6,
+    },
+  ],
+  [
+    'claude-opus-4-7',
+    {
+      in: 5e-6,
+      out: 25e-6,
+      cacheRead: 0.5e-6,
+      cacheCreation: 6.25e-6,
+    },
+  ],
+  [
+    'claude-opus-4-8',
+    {
+      in: 5e-6,
+      out: 25e-6,
+      cacheRead: 0.5e-6,
+      cacheCreation: 6.25e-6,
+    },
+  ],
   // Opus 5 单价与 Opus 4.8 逐项相同（platform.claude.com/pricing 实测）。key 用
   // dash-form 'claude-opus-5'：上游 modelId 本就无小数点，normalizeModelId 对
   // 'claude-opus-5' / 'claude-opus-5-thinking' 归一到此 key（-5 尾不被当日期）。
-  'claude-opus-5': {
-    in: 5e-6,
-    out: 25e-6,
-    cacheRead: 0.5e-6,
-    cacheCreation: 6.25e-6,
-  },
+  [
+    'claude-opus-5',
+    {
+      in: 5e-6,
+      out: 25e-6,
+      cacheRead: 0.5e-6,
+      cacheCreation: 6.25e-6,
+    },
+  ],
   // Opus 5.5:缓存命中 0.05×($0.20),不是通行的 0.1×。Kiro 计价偏离单价线,反演见 KIRO_BILLING
-  'claude-opus-5-5': {
-    in: 4e-6,
-    out: 20e-6,
-    cacheRead: 0.2e-6,
-    cacheCreation: 5e-6,
-  },
-};
+  [
+    'claude-opus-5-5',
+    {
+      in: 4e-6,
+      out: 20e-6,
+      cacheRead: 0.2e-6,
+      cacheCreation: 5e-6,
+    },
+  ],
+]);
 
 interface KiroBilling {
   /** Kiro 基价(USD/token,与价格表同口径代入 k_in / k_out) */
@@ -193,24 +228,24 @@ function kiroBilling(rateMultiplier: number, missPremium = 1): KiroBilling {
  * - sonnet-5:1.3x,Kiro 计价与 sonnet-4.6 逐项相同;标价降到 $2/$10 后离开倍率线。
  * - opus-5.5:2.0x,命中与输出按倍率缩放,未命中输入另加 1.942 倍基价。
  */
-const KIRO_BILLING: Record<string, KiroBilling> = {
-  'claude-sonnet-5': kiroBilling(1.3),
-  'claude-opus-5-5': kiroBilling(2.0, 1.9423),
-};
+const KIRO_BILLING: ReadonlyMap<string, KiroBilling> = new Map([
+  ['claude-sonnet-5', kiroBilling(1.3)],
+  ['claude-opus-5-5', kiroBilling(2.0, 1.9423)],
+]);
 
 /** Anthropic 最小可缓存前缀(prompt-caching 文档,各平台一致);随代际不单调。 */
-const MODEL_CACHE_THRESHOLD: Record<string, number> = {
-  'claude-haiku-4-5': 4096,
-  'claude-sonnet-4-5': 1024,
-  'claude-sonnet-4-6': 1024,
-  'claude-sonnet-5': 1024,
-  'claude-opus-4-5': 4096,
-  'claude-opus-4-6': 4096,
-  'claude-opus-4-7': 2048,
-  'claude-opus-4-8': 1024,
-  'claude-opus-5': 512,
-  'claude-opus-5-5': 512,
-};
+const MODEL_CACHE_THRESHOLD: ReadonlyMap<string, number> = new Map([
+  ['claude-haiku-4-5', 4096],
+  ['claude-sonnet-4-5', 1024],
+  ['claude-sonnet-4-6', 1024],
+  ['claude-sonnet-5', 1024],
+  ['claude-opus-4-5', 4096],
+  ['claude-opus-4-6', 4096],
+  ['claude-opus-4-7', 2048],
+  ['claude-opus-4-8', 1024],
+  ['claude-opus-5', 512],
+  ['claude-opus-5-5', 512],
+]);
 
 /**
  * Fixed `input_tokens` tail kept on the main (cacheable) path. Captured from
@@ -297,7 +332,8 @@ export function initCreditDerive(multiplier: number): boolean {
 
 /**
  * Override the cache-read price ratio (inversion divisor). This is the single
- * gate for the `[0, 1)` invariant: `≥1` (divisor `1 - ratio` → 0 / negative)
+ * gate for the `[0, 1)` invariant: `≥1` (divisor `missPremium - ratio` → 0 / negative
+ * when missPremium = 1)
  * and negatives are rejected, leaving the measured default in place. Returns
  * whether the override was applied so the env-layer caller can log the outcome
  * (structured, through its own logger) without re-encoding the bound. A
@@ -325,20 +361,19 @@ export function resetCreditDerive(): void {
 /**
  * Collapse model-id variants to one price-table key — the single place that
  * defines the key space, so the exported API and the wire path canonicalize
- * identically. The priced model is the raw wire model the client sent (handlers
- * pass `payload.model` through), so it can be an alias (`claude-haiku-4-5`), a
- * dated snapshot (`claude-haiku-4-5-20251001`, advertised in models-catalog), a
- * dot-form id (`claude-opus-4.6`, if a client sends one), or a `-thinking`
- * variant. Normalize non-leading dots to dashes, strip `-thinking`, then strip a
- * trailing `-20YYMMDD` snapshot date — anchored to a `20xx` year so an arbitrary
- * 8-digit tail (e.g. `-12345678`) is NOT mistaken for a date — so all of them map
- * to the undated dash-form key. (Alias `-4-5`/`-5` tails aren't dates → kept.)
+ * identically. On the wire path the host hands over `kiro.pricedModel`, the
+ * upstream id its `mapModel` resolved (dot-form: `claude-opus-4.6`,
+ * `claude-opus-5.5`), so client spellings core already accepts (`[1m]`, provider
+ * prefixes, case) never reach here. Direct callers and hosts that predate that
+ * key may still pass a raw client name: an alias (`claude-haiku-4-5`), a dated
+ * snapshot (`claude-haiku-4-5-20251001`), or a `-thinking` variant. Normalize
+ * non-leading dots to dashes, strip `-thinking`, then strip a trailing
+ * `-20YYMMDD` snapshot date — anchored to a `20xx` year so an arbitrary 8-digit
+ * tail (e.g. `-12345678`) is NOT mistaken for a date — so all of them map to the
+ * undated dash-form key. (Alias `-4-5`/`-5` tails aren't dates → kept.)
  */
 function normalizeModelId(model: string): string {
-  // Dot-form → dash-form: a client may send 'claude-opus-4.6' but the table is
-  // keyed dash-form. (Kiro's own dot-form mapModel output never reaches here —
-  // the plugin is fed the raw client `payload.model`, so this is a defensive
-  // guard, not a coupling to mapModel.)
+  // Dot-form → dash-form: upstream ids carry dots, the table is keyed dash-form.
   const dashed = model.replace(/(?<=\w)\.(?=\w)/g, '-');
   const noThinking = dashed.endsWith('-thinking') ? dashed.slice(0, -'-thinking'.length) : dashed;
   return noThinking.replace(/-20\d{6}$/, '');
@@ -518,7 +553,7 @@ export function deriveKiroUsage(
     return gptCacheDerivedBreakdown(variant, inputTokensTotal, outputTokens, credits);
   }
 
-  const cp = CLAUDE_PRICE_USD_PER_TOK[normalizedModel];
+  const cp = CLAUDE_PRICE_USD_PER_TOK.get(normalizedModel);
 
   if (cp == null) {
     return passthroughBreakdown(
@@ -534,17 +569,20 @@ export function deriveKiroUsage(
     return passthroughBreakdown(0, outputTokens, credits, cp, 'below_threshold');
   }
 
-  const threshold = MODEL_CACHE_THRESHOLD[normalizedModel] ?? 1024;
+  const threshold = MODEL_CACHE_THRESHOLD.get(normalizedModel) ?? 1024;
   if (inputTokensTotal < threshold) {
     return passthroughBreakdown(inputTokensTotal, outputTokens, credits, cp, 'below_threshold');
   }
 
   // Step 2: invert credits → effective uncached input (in base-price tokens)
-  const kiro = KIRO_BILLING[normalizedModel] ?? { in: cp.in, out: cp.out, missPremium: 1 };
+  const kiro = KIRO_BILLING.get(normalizedModel) ?? { in: cp.in, out: cp.out, missPremium: 1 };
   const kiroUsd = credits * KIRO_OVERAGE_RATE;
   const kiroInputUsd = Math.max(0, kiroUsd - KIRO_K_OUT * kiro.out * outputTokens);
   const tEffIn = kiroInputUsd / (KIRO_K_IN * kiro.in);
-  const allMiss = kiro.missPremium * inputTokensTotal;
+  // 未命中溢价只作用于 prompt:T 含本轮输出,输出按输出价计、不带溢价(opus-5.5 与 opus-5 的
+  // 输出单价比正好是倍率 2.0/2.2)。把溢价乘到整个 T 上,冷请求会凭空多出约 0.67 × 输出的命中。
+  const visibleOut = clamp(outputTokens, 0, inputTokensTotal);
+  const allMiss = kiro.missPremium * (inputTokensTotal - visibleOut) + visibleOut;
 
   let cacheRead: number;
   if (tEffIn >= allMiss) {

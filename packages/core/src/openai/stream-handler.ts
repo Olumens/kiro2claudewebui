@@ -34,12 +34,13 @@ export async function handleOpenAiStreamRequest(
     finalTerminal: (encoder, ctx) => {
       const out: string[] = [];
       if (includeUsage) {
+        const promptTokens = ctx.contextInputTokens ?? ctx.inputTokens;
         out.push(
           encoder.usageChunkLine(
             buildOpenAiUsage(
-              ctx.contextInputTokens ?? ctx.inputTokens,
+              promptTokens,
               ctx.outputTokens,
-              resolveCacheReadTokens(ctx.usageFinishEvent),
+              resolveCacheReadTokens(ctx.usageFinishEvent, promptTokens),
               resolvePluginUsageExtensions(ctx.usageFinishEvent),
             ),
           ),

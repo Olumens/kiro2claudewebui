@@ -94,7 +94,7 @@ Kiro 逐账号灰度,还停在 272K 的账号把 `KIRO2CLAUDE_GPT_CONTEXT_WINDOW
 
 ### OpenAI prompt_tokens
 
-`buildClaudeUsagePayload` 会应用 derived 插件的 `input_tokens` 覆写(缓存拆分语义),而 OpenAI `prompt_tokens` 是**输入总量(含缓存)**。故 `openai/` usage 必须直接读 reducer 原始 `contextInputTokens ?? inputTokens` 与 `outputTokens`、绕过 `buildClaudeUsagePayload`;计费 hook 仍跑,`addExtension` 的 `kiro_*` 扩展照常并入(经 `resolvePluginUsageExtensions`,`/api/*` 镜像剥掉)。插件覆写只取 `cache_read_input_tokens` 一项(`resolveCacheReadTokens`),映射成 OpenAI 的 `cached_tokens`——它在 OpenAI 语义里本来就是 `prompt_tokens` 的子集,与 derived 的恒等式 `input + cache_read == 总量` 同口径;`input_tokens` 覆写仍不套。早先连这一项也不取,GPT 走 OpenAI 协议时 derived 反演出的命中全部丢在网关里,Codex 看到的缓存恒为 0。
+`buildClaudeUsagePayload` 会应用 derived 插件的 `input_tokens` 覆写(缓存拆分语义),而 OpenAI `prompt_tokens` 是**输入总量(含缓存)**。故 `openai/` usage 必须直接读 reducer 原始 `contextInputTokens ?? inputTokens` 与 `outputTokens`、绕过 `buildClaudeUsagePayload`;计费 hook 仍跑,`addExtension` 的 `kiro_*` 扩展照常并入(经 `resolvePluginUsageExtensions`,`/api/*` 镜像剥掉)。插件覆写只取 `cache_read_input_tokens` 一项(`resolveCacheReadTokens`,夹到 `[0, prompt_tokens]`——插件契约只保证有限数),映射成 OpenAI 的 `cached_tokens`——它在 OpenAI 语义里本来就是 `prompt_tokens` 的子集,与 derived 的恒等式 `input + cache_read == 总量` 同口径;`input_tokens` 覆写仍不套。早先连这一项也不取,GPT 走 OpenAI 协议时 derived 反演出的命中全部丢在网关里,Codex 看到的缓存恒为 0。
 
 ### Codex 只说 Responses
 
@@ -166,11 +166,25 @@ plugin-derived 据此反演(`gptCacheDerivedBreakdown`):按隐藏推理 = 0 解�
 
 ### 跨模型对照
 
-典型形态:一批下游错误**全部**来自上游 5xx、网关自身零错误。判别顺序(每步独立否掉一批假设):① **同容器跨模型**——同容器同时段某模型大面积失败、另一模型零失败,只 `modelId` 变 → 上游**按模型**容量短缺,一击定案(info 级日志无模型字段,`mapped_model` 只在 `debug`,要开 debug / 用 metering 记账 / 客户端侧分桶);② **分钟级时间轴**——失败集中在十几分钟窗口、窗口后流量更高却不失败 → 是事件非长期状态;③ **请求形状对照**(`max_tokens`/`tool_count`/`system_length` 分布相同)→ 非 converter 构造错;④ region/profileArn/`tier` 全同 → 非路由或配额档。**别按主机/账号先分桶**(同机同分钟有账号全挂也有毫发无伤,会误推「账号被封」)。**有界重试对此无效**(上游恢复远慢于请求内重试),空流有界重试的思路不能照搬 5xx;有效缓解是**切模型**。日志用 `capacity_reason` 结构化字段区分,别靠 substring 匹配 `error`。
+典型形态:一批下游错误**全部**来自上游 5xx、网关自身零错误。判别顺序(每步独立否掉一批假设):① **同容器跨模型**——同容器同时段某模型大面积失败、另一模型零失败,只 `modelId` 变 → 上游**按模型**容量短缺,一击定案(上游 429/5xx 那几行(带 `capacity_reason`)不带模型字段,按 `reqId` 关联同请求 info 级入口行的 `model`(客户端原名);映射后的 `mapped_model` 只在 `debug`);② **分钟级时间轴**——失败集中在十几分钟窗口、窗口后流量更高却不失败 → 是事件非长期状态;③ **请求形状对照**(`max_tokens`/`tool_count`/`system_length` 分布相同)→ 非 converter 构造错;④ region/profileArn/`tier` 全同 → 非路由或配额档。**别按主机/账号先分桶**(同机同分钟有账号全挂也有毫发无伤,会误推「账号被封」)。**有界重试对此无效**(上游恢复远慢于请求内重试),空流有界重试的思路不能照搬 5xx;有效缓解是**切模型**。日志用 `capacity_reason` 结构化字段区分,别靠 substring 匹配 `error`。
 
 ### 容量不足的 5xx 为何是 503 而非 502
 
-「压成 502」是给**未知**失败态的默认值,而 `MODEL_TEMPORARILY_UNAVAILABLE` / `INSUFFICIENT_MODEL_CAPACITY` 是已知态——同一件事上游还会用 429 和 mid-stream `ThrottlingException` 表达,那两条都是可重试信号(429 / 503),这条若压成 502,容量事件就看着像网关自己坏了。施加点在 `retry-executor.ts` 的 5xx 分支而非 `classifyErrorBody`:后者跑在 429 分支**之前**(会把更具体的 429 劫持成 503)且拿不到 header(丢 Retry-After)。只作用于 5xx——429 保持 `rate_limited`、408 保持透传,两条都有反向守卫。下游三元组复用 `upstreamErrorWire(true)`,与 mid-stream 容量信号同一份定义。判别子 / 判别顺序 / 为何不透传 504 / 为何绝不自己编 Retry-After,全在 `matchModelCapacityReason()` 与 `MODEL_CAPACITY_REASONS` 的头注释(`kiro/provider-error.ts`)。反过来,402 配额判定(`isMonthlyRequestLimitBody`)故意是宽松全文扫描,不套用「先读声明的 reason」——两者代价不对称:漏判配额 = 400「请检查请求体」(错且不可重试),而容量侧的产物是日志维度,一个似是而非的 token 比没有更糟。别统一这两个函数(反向守卫在 `test/kiro/provider-error.test.ts`)。
+「压成 502」是给**未知**失败态的默认值,而 `MODEL_TEMPORARILY_UNAVAILABLE` / `INSUFFICIENT_MODEL_CAPACITY` 是已知态——同一件事上游还会用 429 和 mid-stream `ThrottlingException` 表达,那两条都是可重试信号(429 / 503),这条若压成 502,容量事件就看着像网关自己坏了。施加点在 `retry-executor.ts` 的 5xx 分支而非 `classifyErrorBody`:后者跑在 429 分支**之前**(会把更具体的 429 劫持成 503)且拿不到 header(丢 Retry-After)。只作用于 5xx——429 保持 `rate_limited`、408 保持透传,两条都有反向守卫。下游三元组复用 `upstreamErrorWire(true)`,与 mid-stream 容量信号同一份定义。判别子 / 判别顺序在 `matchModelCapacityReason()` 与 `MODEL_CAPACITY_REASONS` 的头注释(`kiro/provider-error.ts`);为何恒 503、不透传 504 见 `claude/error-mapper.ts` 的 `overloaded` 分支注释;为何绝不自己编 Retry-After 见 `parseRetryAfter` 头注释(`kiro/retry-executor.ts`)。反过来,额度判定(`matchQuotaExhausted`,见「额度耗尽」)对 402 根本不看 body——两者代价不对称:漏判额度 = 400「请检查请求体」(错且不可重试),而容量侧的产物是日志维度,一个似是而非的 token 比没有更糟。别统一这两个函数(反向守卫在 `test/kiro/provider-error.test.ts`)。
+
+### 额度耗尽:402 一律算,其它 4xx 看声明的 reason
+
+上游用两种异常报「额度用完」。依据是 kiro-cli 自带 KAS SDK 里 KiroRuntimeService 的错误 schema 和 KAS 自己的映射:
+
+- `ServiceQuotaExceededException` = HTTP **402**,reason 为 `MONTHLY_REQUEST_COUNT` / `OVERAGE_REQUEST_LIMIT_EXCEEDED` / `CONVERSATION_LIMIT_EXCEEDED`。这个服务的 402 只有这一种异常。
+- `ThrottlingException` = HTTP **429**,reason 里既有额度类(`MONTHLY_REQUEST_COUNT` / `DAILY_REQUEST_COUNT`),也有真限流(`INSUFFICIENT_MODEL_CAPACITY` / `CREDIT_CONSUMPTION_RATE_EXCEEDED` / `USER_REQUEST_RATE_EXCEEDED` / `SERVICE_REQUEST_RATE_EXCEEDED`)。
+- KAS 把两种异常里 reason 为 `HOURLY/DAILY/WEEKLY/MONTHLY_REQUEST_COUNT` 或 `USAGE_LIMIT_REACHED` 的都转成不可重试的 `UsageLimitReachedError`,`OVERAGE_REQUEST_LIMIT_EXCEEDED` 转成 `OverageLimitReachedError`(「You've reached your overage limit.」);只有容量与速率类走可重试的限流错误。
+
+公开报文与 schema 一致:402 + `MONTHLY_REQUEST_COUNT`、402 + `OVERAGE_REQUEST_LIMIT_EXCEEDED` 都有实际出现的记录。
+
+网关规则(`matchQuotaExhausted`,`kiro/provider-error.ts`,在 `classifyErrorBody` 里、先于 429 分支):402 一律算额度耗尽;其它 4xx 只认**声明的** reason 属于 `USAGE_LIMIT_REASONS`,不扫 prose——429 上误判的代价是把可重试的限流变成硬停。下游统一 402 `billing_error`(Anthropic 原生类型,SDK 不重试),日志 `quota_reason` 记上游 reason。修之前(2026-09-27):402 + overage 上限 → 400「请检查请求体」;429 + 月 / 日额度 → 可重试的 429,客户端对着下个周期才重置的额度反复退避;402 + 月额度 → 402 但类型是 `api_error`。守卫 `test/kiro/provider-error.test.ts`、`test/kiro/retry-executor-429.test.ts`、`test/claude/quota-exhausted-e2e.test.ts`(真 provider + executor + 路由,四个端点)。
+
+流中途的异常帧不看 reason:`ThrottlingException` 帧仍按可重试 503 处理,客户端重发后新请求在建流前就拿到 402 / 429,走上面的规则,只多一次空请求。帧形态的额度耗尽没人报过,不为它加第三种终态。
 
 ## 日志四条守卫的理由
 
@@ -233,7 +247,7 @@ KAS(2.23.1)实测:assistant 侧 `{content, toolUses:[{toolUseId,name,input}], re
 - effort 只在顶层 `additionalModelRequestFields` 生效,形状由 `ListAvailableModels` 的 `additionalModelRequestFieldsSchema` 逐模型给出:Claude = `{thinking:{type:adaptive|disabled, display?:summarized|omitted}, output_config:{effort}, max_tokens}`(4.6 系无 xhigh);GPT = `{reasoning:{effort}}`(含 none)。写在 `userInputMessage.reasoning` 的 effort 上游不认(计费不随档位变)。`thinking.type: disabled` 真关;`display: omitted` 只回 signature 帧。Claude Code 发的就是 adaptive + omitted。
 - 回包 reasoning 是摘要:文本长度不随 effort 变,credits 才是 effort 生效的判据;末尾单独一帧只有 `{signature}`。
 - 顶层 `systemPrompt` 两个 target 都 400(只有 `com.amazon.kiro.runtimeservice` 命名空间有它,KAS 受 feature flag 控制也没发)——system 仍无 wire 通道,折进首条 user(见「注入文本」)。KAS 自己用开场假轮次承载 system,网关有意不照抄(见「kiro-cli V3(KAS)的 wire」)。
-- 逐模型能力:opus-5 / 4.7 / 4.8 回摘要 reasoning + signature,opus-5 是唯一默认就思考的;sonnet-5 回 signature 帧、计费随 effort 变;sonnet-4.6 加字段后回明文 reasoning + signature,默认不思考;opus-5.5 的 schema 里 thinking 只有 adaptive(显式 disabled 回 400 `ValidationException`)、effort 默认 medium,reasoning 帧与签名同 opus-5;opus-4.6 发字段只涨计费、无帧无签名;4.5 及以下 / haiku 无 schema。非原生模型只认 `<thinking_mode>enabled</thinking_mode><max_thinking_length>N</max_thinking_length>` 前缀,收到 adaptive 形态或没有前缀都把推理写进正文——本项目不注入任何前缀,仅作记录。
+- 逐模型能力:opus-5 / 4.7 / 4.8 回摘要 reasoning + signature,opus-5 默认就思考(opus-5.5 的 thinking 关不掉,见下);sonnet-5 回 signature 帧、计费随 effort 变;sonnet-4.6 加字段后回明文 reasoning + signature,默认不思考;opus-5.5 的 schema 里 thinking 只有 adaptive(显式 disabled 回 400 `ValidationException`)、effort 默认 medium,reasoning 帧与签名同 opus-5;opus-4.6 发字段只涨计费、无帧无签名;4.5 及以下 / haiku 无 schema。非原生模型只认 `<thinking_mode>enabled</thinking_mode><max_thinking_length>N</max_thinking_length>` 前缀,收到 adaptive 形态或没有前缀都把推理写进正文——本项目不注入任何前缀,仅作记录。
 - 其它:`ListAvailableModels` 带 `tokenLimits` / `promptCaching` / `refusalFallbackModels`,直打走 KAS 控制面 `management.{region}.kiro.dev`(runtime / codewhisperer 两个 host 不认该 target,入口见 `claude-rate-probe.ts` 的 `models` 阶段);`kiro-cli --effort` 与 `/effort` 在非交互和 legacy UI 下都不上 wire;KAS 发 `toolUses: []` 上游照收。
 - **KAS 在客户端没指定时也发默认 effort**:取 schema 的 `default`(opus-4.7 为 xhigh、opus-5.5 为 medium,其余原生模型为 high;Claude 同时发 `thinking:{type:adaptive}`)。网关照此补默认(`defaultEffort`),只影响不带 thinking / reasoning_effort 的客户端——录得的 5923 条 Claude Code 请求全部显式带 thinking,Codex 总带 effort。
 - Claude Code 2.1.278 headless 验收全过;请求含 `thinking.display`、`context_management` 与新 beta 头,均透传;启动时多一个 `HEAD /claude/api/hello`,网关 404 它照跑。
@@ -241,9 +255,9 @@ KAS(2.23.1)实测:assistant 侧 `{content, toolUses:[{toolUseId,name,input}], re
 **本项目的做法**(真相源 `claude/converter.ts`、`claude/types.ts`、`kiro/retry-executor.ts`):
 
 - thinking 只有 adaptive 一种语义:`normalizeThinking` 把 `enabled` 归一成 `adaptive`、丢掉 `budget_tokens`;`resolveEffort` 只看 `output_config.effort`(缺省为模型默认,见上)。
-- 原生模型(`MODELS_WITH_NATIVE_REASONING`)由 `buildAdditionalModelRequestFields` 生成顶层字段,`toKiroRequest` 装配、三个 handler 共用;`display` 透传;sonnet-4.6 的 xhigh 降 high;`max_tokens` 不发(传了会让小 max_tokens 的客户端在思考阶段被截断);客户端没提 thinking 时同 KAS 补默认;thinking 常开的 opus-5.5(`MODELS_THINKING_ALWAYS_ON`)收到 `disabled` 也按 adaptive 发。本轮实际生效的 thinking 只由 `effectiveThinking` 判定,上游字段与响应侧 thinking 通道(`responseThinkingEnabled`)都从它推出;两边各算各的时,未提 thinking 的流式请求会先开一个空 text 块、thinking 被挤到其后。
-- OpenAI 的 `reasoning_effort` / `reasoning.effort`(`reasoningConfigFromEffort`):`none` → disabled、`minimal` → low、缺省或未知取值按模型默认;`-thinking` 后缀只开 adaptive,effort 同样按模型默认。
-- 非原生模型不做任何 thinking 控制:不发字段、不注入前缀,`-thinking` 后缀是空操作;响应侧 legacy `<thinking>` 解码器保留。
+- 原生模型(`MODELS_WITH_NATIVE_REASONING`)由 `buildAdditionalModelRequestFields` 生成顶层字段,`toKiroRequest` 装配、三个 handler 共用;`display` 透传;sonnet-4.6 的 xhigh 降 high;`max_tokens` 不发(传了会让小 max_tokens 的客户端在思考阶段被截断);客户端没提 thinking 时同 KAS 补默认;thinking 常开的 opus-5.5(`MODELS_THINKING_ALWAYS_ON`)收到 `disabled` 按 adaptive + effort low 发(Anthropic 文档对该模型「关思考」给的替代写法;客户端显式 effort 优先),响应照常带 thinking 块——Anthropic 上这个模型本来就一定回 thinking 块。本轮实际生效的 thinking 只由 `effectiveThinking` 判定,上游字段与响应侧 thinking 通道(`responseThinkingEnabled`)都从它推出;两边各算各的时,未提 thinking 的流式请求会先开一个空 text 块、thinking 被挤到其后。
+- OpenAI 的 `reasoning_effort` / `reasoning.effort`(`reasoningConfigFromEffort`):`none` → disabled、`minimal` → low、缺省或未知取值按模型默认。OpenAI 两个端点不解析 `-thinking` 后缀,思考开关只看 effort;Messages 端点的后缀只开 adaptive,effort 取 `output_config.effort`、缺省按模型默认(`request-validator.ts`)。
+- 非原生模型不做任何 thinking 控制:不发字段、不注入前缀;`-thinking` 后缀不改上游请求,只像客户端显式发 thinking 一样打开响应侧 legacy `<thinking>` 解码(解码器只对非原生模型保留)。
 - history:只把带签名的 `thinking` 块放进 `reasoningContent`(`redacted_thinking`:网关信封还原成原生推理,外来的 → `redactedContent`),无签名的丢弃,content 只放可见文本,绝不拼 `<thinking>`;一条 Kiro 消息一个槽位,多块取最后一块。
 - 签名失效:`RetryExecutor` 收到 `THINKING_SIGNATURE_INVALID` 剥掉全部 `reasoningContent` 重发一次(info 级),再失败才 400。
 
@@ -251,10 +265,11 @@ KAS(2.23.1)实测:assistant 侧 `{content, toolUses:[{toolUseId,name,input}], re
 
 ### 支持哪些模型 / 加模型要同改的地方
 
-`claude/models-catalog.ts` + `mapModel()`。**加 GPT 变体同改**:mapModel / MODELS_WITH_NATIVE_REASONING / claude catalog(openai catalog 复用它)/ plugin-derived `gptVariant`(跨包复制的变体 token sol·terra·luna·codex)+ `GPT_RATE_MULTIPLIER`(上游 rateMultiplier);context window 按 `isGptModelId` 前缀判定,不用改;**加 Claude 模型同改**(原生集合现含 sonnet-5 / sonnet-4.6 / opus-5.5):mapModel / MODELS_WITH_NATIVE_REASONING / `MODELS_WITHOUT_XHIGH`(上游 schema 无 xhigh 的才列)/ `CLAUDE_MODELS_WITH_1M_CONTEXT`(1M 窗口的才列)/ `DEFAULT_EFFORT_BY_MODEL`(schema 默认不是 high 的才列)/ claude catalog / plugin-derived price+threshold——mapModel 里是往 `CLAUDE_FAMILIES` 对应家族加一个上游 id(版本号由 id 解析,有无小数点以 list-models 为准);比表中最新版本还新的名字一律 400、不降级,所以新模型不加表就用不了;openai catalog 自动继承。schema 里 thinking 没有 disabled 的模型(opus-5.5)另入 `MODELS_THINKING_ALWAYS_ON`,`disabled` 按 adaptive 发。threshold 取 Anthropic prompt-caching 文档的最小可缓存长度,随代际**不单调**(opus-5.5 / opus-5 512、opus-4.8 1024、opus-4.7 2048、opus-4.6 4096)。Fable 系列上游尚不成熟,不支持(mapModel 不认,400)。
+`claude/models-catalog.ts` + `mapModel()`。**加 GPT 变体同改**:mapModel / MODELS_WITH_NATIVE_REASONING / claude catalog(openai catalog 复用它)/ plugin-derived `gptVariant`(跨包复制的变体 token sol·terra·luna·codex)+ `GPT_RATE_MULTIPLIER`(上游 rateMultiplier);context window 按 `isGptModelId` 前缀判定,不用改;**加 Claude 模型同改**(原生集合的 Claude 部分现为 opus-5.5 / opus-5 / opus-4.8 / opus-4.7 / sonnet-5 / sonnet-4.6):mapModel / MODELS_WITH_NATIVE_REASONING / `MODELS_WITHOUT_XHIGH`(上游 schema 无 xhigh 的才列)/ `CLAUDE_MODELS_WITH_1M_CONTEXT`(1M 窗口的才列)/ `DEFAULT_EFFORT_BY_MODEL`(schema 默认不是 high 的才列)/ claude catalog / plugin-derived price+threshold(漏了不报错、只会让该模型 `unknown_model`,守卫 `test/static/derived-price-coverage.test.ts`)——mapModel 里是往 `CLAUDE_FAMILIES` 对应家族加一个上游 id(版本号由 id 解析,有无小数点以 list-models 为准);表里没有的版本(比最新还新、或夹在已知版本之间,如 opus-5.1)一律 400、不降级,只有没有版本号或比最老已知版本还老的写法走家族兜底,所以新模型不加表就用不了;minor 后面紧跟字母的不算 minor(`opus-5-1m` 是 opus-5);openai catalog 自动继承。schema 里 thinking 没有 disabled 的模型(opus-5.5)另入 `MODELS_THINKING_ALWAYS_ON`,`disabled` 按 adaptive 发。threshold 取 Anthropic prompt-caching 文档的最小可缓存长度,随代际**不单调**(opus-5.5 / opus-5 512、opus-4.8 1024、opus-4.7 2048、opus-4.6 4096)。Fable 系列上游尚不成熟,不支持(mapModel 不认,400)。
 
 **derived 价格表只管 `claudeEquivalentCostUsd`,反演用的是 Kiro 的计价**。Kiro 按上游 rateMultiplier 计价:同样的 token,sonnet-4.6 / sonnet-5 的冷价与输出价正好是 opus-5 × 1.3/2.2(四位有效数字一致)。opus 系标价正在倍率线上(倍率 / 输入单价 = 0.44),sonnet-4.x 的 $3 高 1.5%,haiku 的 $1 按倍率线算高 10%(与 `KIRO_CACHE_READ_RATIO` 记录的 haiku 残差同向),这些沿用标价反演;明显偏离的模型进 `KIRO_BILLING`(基价 = opus 标定线 × 倍率 / 2.2,另可带未命中溢价),否则反演系统性偏差。新模型先跑 `test/manual/claude-rate-probe.ts`(💰,两个模型默认全跑约 8 credit)与已标定模型同尺寸对照:
 
-- **opus-5.5**(2026-09-27,对照 opus-5):上游倍率 2.0 / 2.2,输出与命中价正好按倍率缩放(0.909 / 0.911);**未命中输入却是 opus-5 的 1.770 倍**(三个冷尺寸共线,残差为零),折成基价 1.942 倍。同前缀重发命中价 = 基价 × 0.530,与全局 `KIRO_CACHE_READ_RATIO` 一致。照 $4/$20 标价反演等于把冷价当基价:重发 99.8% 命中算成 84%,命中前缀 + 新内容算成 0。对用户的含义:冷启动 / 缓存失效的请求比 opus-5 贵约 77%,稳态命中比 opus-5 便宜约 9%。
+- **opus-5.5**(2026-09-27,对照 opus-5):上游倍率 2.0 / 2.2,输出与命中价正好按倍率缩放(0.909 / 0.911);**未命中输入却是 opus-5 的 1.770 倍**(三个冷尺寸共线,残差为零),折成基价 1.942 倍。同前缀重发命中价 = 基价 × 0.530,与全局 `KIRO_CACHE_READ_RATIO` 一致。照 $4/$20 标价反演等于把冷价当基价:重发 99.8% 命中算成 84%,命中前缀 + 新内容算成 0。对用户的含义:冷启动 / 缓存失效的请求比 opus-5 贵约 77%,稳态命中比 opus-5 便宜约 9%。溢价只落在 prompt 上:`kiro.inputTokens` 含本轮输出,而输出单价比 0.909 恰为倍率比(输出也带溢价的话应是 0.923),所以全未命中基线 = 溢价 ×(T − 可见输出)+ 可见输出;把溢价乘到整个 T 上,冷请求会凭空多出约 0.67 × 输出的命中。
 - **sonnet-5**(2026-09-27,对照 sonnet-4.6):冷价、输出价与 sonnet-4.6 逐项相同,无未命中溢价;Anthropic 把 $2/$10 转为标准价后标价离开倍率线,按 $2 反演会把同前缀重发的 98.5% 命中算成 44%,故进 `KIRO_BILLING`(1.3x)。探针注意:sonnet-5 对 ≥30K token 的随机串文档会回 `metadataEvent.stopReason = CONTENT_FILTERED`(空流、不计费,但前缀照样写进缓存),标定时调小 `K2C_WORDS_*`。
 - 同一轮还复核了 opus-5:冷斜率与 `k_in` 线差 0.26%,命中比 0.529,老标定仍成立。sonnet-4.6 仍按 $3 反演,比倍率线高 1.5%,冷请求会多出约 3.7% 命中(既有残差)。
+- 已知残差,未修:小 prompt + 长输出时 Claude 路径严重低估命中。同一轮 `output` 阶段(数到 100 / 500),KAS 自带的约 6.7K 前缀是真实命中,反演只得 0–5K。根因与 GPT 相同(「GPT credit 锚定与缓存反演」):core 按 4 字符 / token 估可见输出,数字串低估约一半,误差再经 `k_out` 放大。Claude Code 稳态流量的输出占比小,影响有限。

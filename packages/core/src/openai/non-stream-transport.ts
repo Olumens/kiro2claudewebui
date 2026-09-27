@@ -181,7 +181,7 @@ export async function runOpenAiNonStream(
       reduced,
       finalInputTokens,
       outputTokens,
-      resolveCacheReadTokens(hookEvent),
+      resolveCacheReadTokens(hookEvent, finalInputTokens),
       resolvePluginUsageExtensions(hookEvent),
     );
 

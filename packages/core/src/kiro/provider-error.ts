@@ -15,7 +15,8 @@
  *
  * ## Variants
  *
- * - `quota_exhausted` — 402 + MONTHLY_REQUEST_COUNT signal
+ * - `quota_exhausted` — any 402, or another 4xx declaring a usage-limit reason
+ *                        ({@link USAGE_LIMIT_REASONS}); carries the declared reason for logs
  * - `bad_request`      — generic 400 that doesn't match a more specific kind
  * - `context_window_full` — 400 with CONTENT_LENGTH_EXCEEDS_THRESHOLD
  * - `input_too_long`   — 400 with "Input is too long"
@@ -37,7 +38,7 @@
  */
 
 export type ProviderErrorKind =
-  | { kind: 'quota_exhausted'; status: 402 }
+  | { kind: 'quota_exhausted'; status: number; reason?: string }
   | { kind: 'bad_request'; status: number }
   | { kind: 'context_window_full'; status: number }
   | { kind: 'input_too_long'; status: number }
@@ -131,9 +132,8 @@ export function classifyErrorBody(
       }
     >
   | undefined {
-  if (status === 402 && isMonthlyRequestLimitBody(body)) {
-    return { kind: 'quota_exhausted', status: 402 };
-  }
+  const quota = matchQuotaExhausted(status, body);
+  if (quota) return { kind: 'quota_exhausted', status, reason: quota.reason };
   if (body.includes('CONTENT_LENGTH_EXCEEDS_THRESHOLD')) {
     return { kind: 'context_window_full', status };
   }
@@ -148,29 +148,46 @@ export function classifyErrorBody(
 }
 
 /**
- * Standalone body check for "monthly quota exhausted". Kept as an exported
- * function (not a class static) so callers can import it without pulling
- * in the whole provider module — and so the contract tests can
- * verify the classification logic without constructing a real provider.
- *
- * ★ Deliberately a permissive whole-body scan, **unlike**
- * {@link matchModelCapacityReason}, which trusts the declared `reason` first.
- * The cost asymmetry runs the other way, so do NOT unify them: a miss here sends
- * an out-of-quota user to `bad_request` → 400 "check your payload" — wrong *and*
- * non-retryable in the client SDKs — while an over-match only says "quota
- * exhausted" about a 402 that already failed. So superset tokens
- * (`MONTHLY_REQUEST_COUNT_LIMIT_EXCEEDED`) and prose mentions must still match.
+ * Upstream `reason` tokens meaning **"this account's usage limit is used up"** — exactly the set
+ * kiro-cli's KAS client turns into its non-retryable `UsageLimitReachedError` /
+ * `OverageLimitReachedError`, whether they arrive on `ServiceQuotaExceededException` (402) or on
+ * `ThrottlingException` (429). Evidence: 踩坑「额度耗尽」.
  */
-export function isMonthlyRequestLimitBody(body: string): boolean {
-  if (body.includes('MONTHLY_REQUEST_COUNT')) return true;
-  try {
-    const value = JSON.parse(body);
-    if (value?.reason === 'MONTHLY_REQUEST_COUNT') return true;
-    if (value?.error?.reason === 'MONTHLY_REQUEST_COUNT') return true;
-  } catch {
-    // non-JSON body, string match above already decided
-  }
-  return false;
+const USAGE_LIMIT_REASONS = [
+  'MONTHLY_REQUEST_COUNT',
+  'WEEKLY_REQUEST_COUNT',
+  'DAILY_REQUEST_COUNT',
+  'HOURLY_REQUEST_COUNT',
+  'USAGE_LIMIT_REACHED',
+  'OVERAGE_REQUEST_LIMIT_EXCEEDED',
+] as const;
+
+/**
+ * Is this upstream error "usage limit used up"? Returns the declared reason (for the log; may be
+ * `undefined` on a 402 that declared none), or `undefined` when it is not a quota error.
+ *
+ * - **Any 402 counts**, whatever the body says: KiroRuntimeService's only 402 is
+ *   `ServiceQuotaExceededException` (reasons MONTHLY_REQUEST_COUNT / OVERAGE_REQUEST_LIMIT_EXCEEDED /
+ *   CONVERSATION_LIMIT_EXCEEDED). The body scan this replaced only knew MONTHLY_REQUEST_COUNT and sent
+ *   an exhausted overage cap to `bad_request` → 400 "check your payload".
+ * - **Other 4xx count only on a declared {@link USAGE_LIMIT_REASONS} token** — above all a 429
+ *   `ThrottlingException` + MONTHLY/DAILY_REQUEST_COUNT, which would otherwise be forwarded as a
+ *   retryable 429 and have clients back off against a limit that resets next day / month.
+ *   Declared-only (no prose scan) because here an over-match is the costly side: it would turn a
+ *   genuinely retryable rate limit into a hard stop.
+ *
+ * ★ Do NOT unify with {@link matchModelCapacityReason}: capacity is a 5xx-gated retryable signal,
+ * this is a 4xx non-retryable one, and the two have opposite over-match costs.
+ */
+export function matchQuotaExhausted(
+  status: number,
+  body: string,
+): { reason: string | undefined } | undefined {
+  const declared = declaredReasons(body);
+  const reason = USAGE_LIMIT_REASONS.find((t) => declared.includes(t));
+  if (status === 402) return { reason: reason ?? declared[0] };
+  if (status >= 400 && status < 500 && reason !== undefined) return { reason };
+  return undefined;
 }
 
 /** Does the response body say "bearer token invalid"? */

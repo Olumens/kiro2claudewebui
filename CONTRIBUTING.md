@@ -7,7 +7,7 @@ kiro2claude 是一个 **MIT 开源**项目,本仓库就是主开发仓——直�
 - `packages/plugin-api/` —— 插件契约(类型 + 抽象基类,0 运行时依赖)
 - `packages/core/` —— 网关 runtime
 - `packages/plugin-metering/` —— 随镜像默认启用的计量插件(注入 `usage.kiro_metering`)
-- `packages/plugin-derived/` —— 随镜像默认启用的 credit 反演插件(注入 `usage.kiro_derived`)
+- `packages/plugin-derived/` —— 随镜像默认启用的 credit 反演插件(默认覆写标准 token 字段,诊断模式注入 `usage.kiro_derived`)
 - `packages/examples/echo-plugin/` —— 最小插件示范
 - `tools/claude-code/` `tools/codex/` —— Claude Code / Codex CLI 兼容性测试 harness(Docker,非 runtime)
 - `docs/PLUGIN-DEVELOPMENT.md` —— 插件开发指南
@@ -78,7 +78,7 @@ commitlint 只卡标题 120 字符,正文长度靠惯例。
 
 版本发布**全自动**,由 [semantic-release](https://semantic-release.gitbook.io/) 驱动——维护者**无需**手动改版本号或打 tag。每次 push 到 `master`,`.github/workflows/release.yml` 会:
 
-1. 跑发布门禁(`check` + `typecheck` + `build` + `test`,与 CI 同一套);
+1. 跑发布门禁(`check` + `typecheck` + `build` + `test` + 插件发现冒烟 `scripts/smoke-plugin-loader.mjs`,与 CI 同一套);
 2. semantic-release 分析自上次发布以来的 commit,按 [Conventional Commits](https://www.conventionalcommits.org/) 决定版本号:
    - `fix:` → patch(`x.y.Z`)
    - `feat:` → minor(`x.Y.0`)

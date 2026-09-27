@@ -36,6 +36,7 @@ describe('buildResponsesObject', () => {
       inputTokens: 10,
       outputTokens: 3,
       createdAt: 1,
+      cachedTokens: 0,
     });
     expect(r.status).toBe('incomplete');
     expect(r.incomplete_details).toEqual({ reason: 'max_output_tokens' });
@@ -50,6 +51,7 @@ describe('buildResponsesObject', () => {
       inputTokens: 10,
       outputTokens: 1,
       createdAt: 123,
+      cachedTokens: 0,
     });
     expect(r.object).toBe('response');
     expect(r.status).toBe('completed');
@@ -82,6 +84,7 @@ describe('buildResponsesObject', () => {
       inputTokens: 1,
       outputTokens: 1,
       createdAt: 1,
+      cachedTokens: 0,
     });
     expect(r.output).toEqual([
       {
@@ -105,6 +108,7 @@ describe('buildResponsesObject', () => {
       inputTokens: 1,
       outputTokens: 1,
       createdAt: 1,
+      cachedTokens: 0,
     });
     expect(r.output.map((o) => o.type)).toEqual(['message', 'function_call']);
   });
@@ -116,6 +120,7 @@ describe('buildResponsesObject', () => {
       inputTokens: 5,
       outputTokens: 2,
       createdAt: 1,
+      cachedTokens: 0,
     });
     expect(r.output.map((o) => o.type)).toEqual(['reasoning', 'message']);
     expect(r.output[0]).toMatchObject({
@@ -132,6 +137,7 @@ describe('buildResponsesObject', () => {
       inputTokens: 1,
       outputTokens: 1,
       createdAt: 1,
+      cachedTokens: 0,
     });
     expect(r.output[0]).toMatchObject({
       type: 'reasoning',
@@ -146,6 +152,7 @@ describe('buildResponsesObject', () => {
       inputTokens: 1,
       outputTokens: 1,
       createdAt: 1,
+      cachedTokens: 0,
     });
     expect(r.output.map((o) => o.type)).toEqual(['message']);
   });
@@ -207,6 +214,7 @@ describe('buildResponsesObject: freeform(custom)工具', () => {
       inputTokens: 1,
       outputTokens: 1,
       createdAt: 0,
+      cachedTokens: 0,
       customToolNames: new Set(['exec']),
     });
     // 同一响应里两种形态并存:custom 走 input 裸文本,其余仍是 function_call + arguments
@@ -237,6 +245,7 @@ describe('buildResponsesObject: freeform(custom)工具', () => {
       inputTokens: 1,
       outputTokens: 1,
       createdAt: 0,
+      cachedTokens: 0,
       customToolNames: new Set(['exec']),
     });
     expect(r.output[0]).toMatchObject({ type: 'custom_tool_call', input: '' });
@@ -252,6 +261,7 @@ describe('buildResponsesObject: freeform(custom)工具', () => {
       inputTokens: 1,
       outputTokens: 1,
       createdAt: 0,
+      cachedTokens: 0,
     });
     expect(r.output[0]).toMatchObject({ type: 'function_call', arguments: '{"input":"x"}' });
   });

@@ -120,6 +120,8 @@ export interface Config {
   loginLicense: string;
   /** bootstrap login 的整体超时（毫秒），默认 600_000 = 10 分钟 */
   loginTimeoutMs: number;
+  /** 插件扫描根目录(扫描其下 `node_modules`);未设 = core 包所在目录,见 index.ts `resolvePluginRoot` */
+  pluginRoot?: string;
 }
 
 /** 获取有效的 Auth Region（用于 Token 刷新） */

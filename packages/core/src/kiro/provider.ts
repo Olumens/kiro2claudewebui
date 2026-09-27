@@ -33,7 +33,6 @@ import {
 } from './client-profile.js';
 import type { KiroCredentials } from './model/credentials.js';
 import { credentialEffectiveApiRegion } from './model/credentials.js';
-import { isMonthlyRequestLimitBody } from './provider-error.js';
 import {
   drainBufferBody,
   drainStreamBody,
@@ -95,16 +94,6 @@ export class KiroProvider {
     } catch {
       return requestBody;
     }
-  }
-
-  /**
-   * 判断响应体是否指示月度请求配额已耗尽。
-   *
-   * 保留为 static method 以维持对外 API 兼容——`test/kiro/provider.test.ts`
-   * 里的契约测试直接调用这个入口。实现下沉到 `provider-error.ts`，这里只是薄壳。
-   */
-  static isMonthlyRequestLimit(body: string): boolean {
-    return isMonthlyRequestLimitBody(body);
   }
 
   // ========================================================================

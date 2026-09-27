@@ -1,23 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildUpstreamAgentOptions, KiroProvider } from '../../src/kiro/provider.js';
 
-describe('KiroProvider.isMonthlyRequestLimit', () => {
-  it('test_is_monthly_request_limit_detects_reason', () => {
-    const body = '{"message":"You have reached the limit.","reason":"MONTHLY_REQUEST_COUNT"}';
-    expect(KiroProvider.isMonthlyRequestLimit(body)).toBe(true);
-  });
-
-  it('test_is_monthly_request_limit_nested_reason', () => {
-    const body = '{"error":{"reason":"MONTHLY_REQUEST_COUNT"}}';
-    expect(KiroProvider.isMonthlyRequestLimit(body)).toBe(true);
-  });
-
-  it('test_is_monthly_request_limit_false', () => {
-    const body = '{"message":"nope","reason":"DAILY_REQUEST_COUNT"}';
-    expect(KiroProvider.isMonthlyRequestLimit(body)).toBe(false);
-  });
-});
-
 describe('KiroProvider.injectProfileArn', () => {
   it('test_inject_profile_arn_with_some', () => {
     const body = '{"conversationState":{"conversationId":"c1"}}';

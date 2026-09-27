@@ -679,7 +679,7 @@ describe('handlers stream: error mapping', () => {
     });
     expect(response.statusCode).toBe(402);
     const body = response.json() as { error: { type: string } };
-    expect(body.error.type).toBe('api_error');
+    expect(body.error.type).toBe('billing_error');
   });
 
   it('maps context_window_full to 400 JSON error for stream requests', async () => {

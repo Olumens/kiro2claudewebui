@@ -29,7 +29,8 @@
  * - 400 → classify body, throw `bad_request` / `context_window_full` / `input_too_long`
  *         / `thinking_signature_invalid` (after the one strip-retry above)
  * - 401/403 → optional one-shot force-refresh (above), then throw `unauthorized`
- * - 402 + MONTHLY → throw `quota_exhausted`
+ * - 402, or any 4xx declaring a usage-limit reason (incl. 429) → throw `quota_exhausted`
+ *         (classified before the 429 branch, never retried)
  * - 429 → throw `rate_limited` with parsed Retry-After
  * - 5xx naming a model-capacity reason → throw `overloaded` (mapper returns 503)
  * - 408/other 5xx → throw `transient` with parsed Retry-After (mapper passes status through)

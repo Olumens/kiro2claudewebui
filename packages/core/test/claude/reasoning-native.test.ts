@@ -456,7 +456,7 @@ describe('convertRequest: 顶层 additionalModelRequestFields(effort 唯一生�
     });
   });
 
-  it('opus-5.5:adaptive + xhigh/max 原样;disabled → 按 adaptive 发(上游 schema 无 disabled,发了 400)', () => {
+  it('opus-5.5:adaptive + xhigh/max 原样;disabled → adaptive + low(上游 schema 无 disabled,发了 400)', () => {
     const at = (effort: string) =>
       convertRequest(baseMessagesRequest({ model: 'claude-opus-5-5', ...adaptive(effort) }))
         .additionalModelRequestFields;
@@ -465,19 +465,21 @@ describe('convertRequest: 顶层 additionalModelRequestFields(effort 唯一生�
       output_config: { effort: 'xhigh' },
     });
     expect(at('max')).toEqual({ thinking: { type: 'adaptive' }, output_config: { effort: 'max' } });
+    // 关思考的意图落到最低档(Anthropic 文档对该模型的替代写法),不是模型默认的 medium
     const off = baseMessagesRequest({ model: 'claude-opus-5-5', thinking: { type: 'disabled' } });
     expect(convertRequest(off).additionalModelRequestFields).toEqual({
       thinking: { type: 'adaptive' },
-      output_config: { effort: 'medium' },
+      output_config: { effort: 'low' },
     });
-    const offLow = baseMessagesRequest({
+    // 客户端显式 effort 仍优先
+    const offHigh = baseMessagesRequest({
       model: 'claude-opus-5-5',
       thinking: { type: 'disabled' },
-      output_config: { effort: 'low' },
+      output_config: { effort: 'high' },
     });
-    expect(convertRequest(offLow).additionalModelRequestFields).toEqual({
+    expect(convertRequest(offHigh).additionalModelRequestFields).toEqual({
       thinking: { type: 'adaptive' },
-      output_config: { effort: 'low' },
+      output_config: { effort: 'high' },
     });
     // 常开豁免只针对 opus-5.5:其它 Claude 原生模型 disabled 仍真关
     const opusOff = baseMessagesRequest({ model: 'claude-opus-5', thinking: { type: 'disabled' } });

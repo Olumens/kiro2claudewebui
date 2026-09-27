@@ -58,7 +58,7 @@ pnpm dev
 
 > Linux 的 SQLite 路径是 `~/.local/share/kiro-cli/data.sqlite3`(macOS 路径含空格,必须带引号)。
 
-服务默认监听 `127.0.0.1:8080`。把客户端 base URL 指向 `http://127.0.0.1:8080/claude/v1`、key 设为 `sk-local-test`:
+服务默认监听 `127.0.0.1:8080`。Claude 客户端(Anthropic SDK / Claude Code)base URL 指向 `http://127.0.0.1:8080/claude`(SDK 自动补 `/v1/messages`)、key 设为 `sk-local-test`:
 
 ```bash
 curl -s http://127.0.0.1:8080/claude/v1/messages \
@@ -69,7 +69,7 @@ curl -s http://127.0.0.1:8080/claude/v1/messages \
 
 ## HTTP 路由
 
-所有接口用 `KIRO2CLAUDE_API_KEY` 鉴权(`/health` 除外)。
+core 的接口用 `KIRO2CLAUDE_API_KEY` 鉴权(`/`、`/health` 除外);插件路由由插件自己用 `ctx.apiKey` 鉴权。
 
 | 路径 | 方法 | 说明 |
 |---|---|---|
@@ -81,7 +81,7 @@ curl -s http://127.0.0.1:8080/claude/v1/messages \
 | `/openai/v1/chat/completions` | POST | OpenAI Chat Completions(流式 / tool_calls / reasoning) |
 | `/openai/v1/responses` | POST | OpenAI Responses API——**Codex CLI 走这条** |
 | `/api/{claude,openai}/v1/*` | 同上 | 去泄漏镜像:`usage` 剥掉插件扩展字段,只留标准响应 |
-| `/kiro/usage` | GET | 透传 Kiro `getUsageLimits` |
+| `/kiro/usage` | GET | 透传 Kiro `getUsageLimits`(剔除 `userInfo`) |
 
 想要计量字段用 `/claude/v1`;想要纯标准响应用 `/api/claude/v1`(计量后台照跑)。OpenAI 客户端 base URL 指到 `.../openai/v1`、`Authorization: Bearer <key>`。模型 ID 见 [`models-catalog.ts`](./packages/core/src/claude/models-catalog.ts),Claude 每个模型都有 `-thinking` 变体。
 
@@ -91,7 +91,7 @@ curl -s http://127.0.0.1:8080/claude/v1/messages \
 
 ```bash
 docker pull ghcr.io/yupanzi/kiro2claude:latest
-cp .env.example .env   # 填 KIRO2CLAUDE_API_KEY 等
+cp .env.example .env   # 填 KIRO2CLAUDE_API_KEY;删掉 KIRO2CLAUDE_SQLITE_DB_PATH 行(镜像已内置,--env-file 不剥引号)
 
 docker run -d --name kiro2claude --env-file .env \
   -e KIRO2CLAUDE_HOST=0.0.0.0 \
@@ -108,12 +108,12 @@ docker logs -f kiro2claude   # 跟随日志,浏览器打开 device flow URL 完�
 
 ## 插件
 
-实现 [`@kiro2claude/plugin-api`](./packages/plugin-api/) 契约即可扩展网关(加路由、往 `usage` 注入 wire 字段),不用改 core——loader 自动发现 `node_modules` 里带 `kiro2claude-plugin` keyword 的包,按 `dependsOn` 拓扑加载。指南见 [`docs/PLUGIN-DEVELOPMENT.md`](./docs/PLUGIN-DEVELOPMENT.md),示范见 [`echo-plugin`](./packages/examples/echo-plugin/)。
+实现 [`@kiro2claude/plugin-api`](./packages/plugin-api/) 契约即可扩展网关(加路由、往 `usage` 注入 wire 字段),不用改 core——loader 发现 core 所在 `node_modules` 第一层里带 `kiro2claude-plugin` keyword 的包,按 `dependsOn` 拓扑加载(第三方插件要装成 core 的依赖)。指南见 [`docs/PLUGIN-DEVELOPMENT.md`](./docs/PLUGIN-DEVELOPMENT.md),示范见 [`echo-plugin`](./packages/examples/echo-plugin/)。
 
 镜像内置两个插件(默认开):
 
 - [`plugin-metering`](./packages/plugin-metering/)——计量本次 credit 消耗,注入 `usage.kiro_metering`(`KIRO2CLAUDE_METERING_DISABLE=true` 可关)
-- [`plugin-derived`](./packages/plugin-derived/)——把 Kiro credit 反演成 Anthropic 风格 token/cache 字段,注入 `usage.kiro_derived`
+- [`plugin-derived`](./packages/plugin-derived/)——把 Kiro credit 反演成 Anthropic 风格 token/cache 字段:默认直接覆写标准 `input_tokens` / `cache_*`(OpenAI 侧为 `cached_tokens`),`KIRO2CLAUDE_DERIVED_INCLUDE_FIELD=true` 时改为注入 `usage.kiro_derived`(含 USD 成本拆分)
 
 ## 开发
 

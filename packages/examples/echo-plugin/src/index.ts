@@ -8,9 +8,10 @@ import { BasePlugin, type PluginContext } from '@kiro2claude/plugin-api';
  *   2. Route registration on the host Fastify instance
  *   3. usage-finish hook → addExtension(...)
  *
- * Usage: drop this package into the same workspace as @kiro2claude/core —
- * the loader auto-discovers it via the 'kiro2claude-plugin' keyword in this
- * package.json. (Not published to npm.)
+ * Usage: the loader only scans core's own node_modules, so add this package to
+ * `packages/core/package.json` dependencies (`workspace:*`), `pnpm install` and
+ * build it; the 'kiro2claude-plugin' keyword then gets it discovered. Not a core
+ * dependency by default, so it is not loaded. (Not published to npm.)
  */
 class EchoPlugin extends BasePlugin {
   readonly name = 'echo';

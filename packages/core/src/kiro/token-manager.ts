@@ -11,7 +11,7 @@ import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import type { Config } from '../model/config.js';
 import { getLogger, logger } from '../shared/logger.js';
-import { extractRetryAfter } from '../shared/upstream-status.js';
+import { extractRetryAfter } from '../shared/retry-after.js';
 import {
   getKiroClientProfile,
   renderShellUserAgent,

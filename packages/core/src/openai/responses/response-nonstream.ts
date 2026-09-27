@@ -45,7 +45,8 @@ export function buildResponsesObject(args: {
   inputTokens: number;
   outputTokens: number;
   createdAt: number;
-  cachedTokens?: number;
+  /** 必传:漏传即缓存命中恒 0(4acc7f2 修过的 bug),交给编译器兜 */
+  cachedTokens: number;
   extensions?: PluginUsageExtensions;
   /** freeform 工具名(请求侧收集);命中者产 custom_tool_call 而非 function_call。 */
   customToolNames?: ReadonlySet<string>;
@@ -60,7 +61,7 @@ export function buildResponsesObject(args: {
     inputTokens,
     outputTokens,
     createdAt,
-    cachedTokens = 0,
+    cachedTokens,
     extensions,
     customToolNames = NO_FREEFORM_TOOLS,
     toolNamespaces = NO_TOOL_NAMESPACES,

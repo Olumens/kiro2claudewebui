@@ -37,16 +37,18 @@ export async function handleResponsesStreamRequest(
     // runOpenAiStream 的签名由 chat 端点共用。
     makeEncoder: (m) =>
       new ResponsesEventEncoder(m, codec.customToolNames, codec.toolNamespaces, reasoningModelId),
-    finalTerminal: (encoder, ctx) =>
-      encoder.finalize(
+    finalTerminal: (encoder, ctx) => {
+      const inputTokens = ctx.contextInputTokens ?? ctx.inputTokens;
+      return encoder.finalize(
         buildResponsesUsage(
-          ctx.contextInputTokens ?? ctx.inputTokens,
+          inputTokens,
           ctx.outputTokens,
-          resolveCacheReadTokens(ctx.usageFinishEvent),
+          resolveCacheReadTokens(ctx.usageFinishEvent, inputTokens),
           resolvePluginUsageExtensions(ctx.usageFinishEvent),
         ),
         ctx.opaqueReasoning,
-      ),
+      );
+    },
     inbandError: (encoder, message, type) => [encoder.errorLine(message, type)],
   };
 

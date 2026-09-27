@@ -8,7 +8,7 @@
 
 Kiro 上游每次返回原始 credit 数,但没有"我已经用了多少 / 还剩多少"的快照。本 plugin 启动期通过 `usage-limits` capability 拉初始 quota(`getUsageLimits`),每次请求 hook 累加 credit,在 `usage` 里注入 `kiro_metering`:给下游本次消耗的 credit 计数(`unit` / `usage`)以及累计用量与配额(`accumulated` / `limit`)。
 
-本 plugin 只做 credit **计量**,不做定价。USD 成本由独立的计价插件负责([`@kiro2claude/plugin-derived`](../plugin-derived/),MIT、随 core 镜像内置;它单独读 `kiro.creditsUsed` host meta、输出 `usage.kiro_derived`),两者互不依赖。
+本 plugin 只做 credit **计量**,不做定价。USD 成本由独立的计价插件负责([`@kiro2claude/plugin-derived`](../plugin-derived/),MIT、随 core 镜像内置;它单独读 `kiro.creditsUsed` host meta,默认覆写标准 token 字段,诊断模式下输出 `usage.kiro_derived`),两者互不依赖。
 
 ## env 开关
 
@@ -31,14 +31,14 @@ KIRO2CLAUDE_METERING_DISABLE=true   # 默认启用;设为 true 才关闭
       "unit": "credit",
       "unitPlural": "credits",
       "usage": 0.737,          // 本次请求消耗的 credits
-      "accumulated": 12.5,     // 启动至今累计 credits
+      "accumulated": 12.5,     // 本计费周期累计 credits(启动时取上游已用量快照,之后逐请求累加)
       "limit": 20000           // plan 配额 (credits)
     }
   }
 }
 ```
 
-USD 成本不在这里——需要金额时读 `usage.kiro_derived`(由 [`@kiro2claude/plugin-derived`](../plugin-derived/) 注入,随 core 镜像内置)。
+USD 成本不在这里——需要金额时设 `KIRO2CLAUDE_DERIVED_INCLUDE_FIELD=true`,读 `usage.kiro_derived.finalCostUsd`(由 [`@kiro2claude/plugin-derived`](../plugin-derived/) 注入,随 core 镜像内置)。
 
 ## 关键真相源
 
@@ -49,7 +49,7 @@ USD 成本不在这里——需要金额时读 `usage.kiro_derived`(由 [`@kiro2
 
 ## 已知限制
 
-**单实例部署专用**:state 在内存里(`MeteringCounter` 类),多副本部署会各自计数;重启清零并在下次启动时从 `getUsageLimits` 快照重新同步。要跨副本持久化需自己再上 Redis 或文件 store。
+**单实例部署专用**:state 在内存里(`MeteringCounter` 类),多副本部署会各自计数;重启后丢弃本进程的累加,从 `getUsageLimits` 快照重新同步。要跨副本持久化需自己再上 Redis 或文件 store。
 
 ## 测试
 

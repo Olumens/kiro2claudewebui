@@ -384,6 +384,18 @@ describe('deriveKiroUsage — opus-5.5 (Kiro billing override)', () => {
     });
   }
 
+  it('长输出冷请求:输出不带未命中溢价,不凭空反演出命中', () => {
+    // total 含本轮输出(所有模型都如此);Kiro 对输出按倍率计价、不加溢价(opus-5.5 / opus-5 输出单价比
+    // 正好 2.0/2.2)。按这个口径构造冷请求的 credits:prompt 12K 全未命中 + 8K 输出。
+    const base = { in: (5e-6 * 2.0) / 2.2, out: (25e-6 * 2.0) / 2.2 };
+    const prompt = 12_000;
+    const out = 8_000;
+    const usd = KIRO_K_IN * base.in * (1.9423 * prompt + out) + KIRO_K_OUT * base.out * out;
+    const r = deriveKiroUsage('claude-opus-5-5', prompt + out, out, usd / KIRO_OVERAGE_RATE);
+    // 溢价乘到整个 total 上时这里会多出约 0.67 × 8K ≈ 5.3K 的命中
+    expect(r.cacheReadInputTokens).toBe(0);
+  });
+
   it('同前缀第二轮:几乎全命中(照 $4 标价反演只有 84%)', () => {
     const out = deriveKiroUsage('claude-opus-5-5', ...WARM);
     expect(out.derived.estimatedCacheHitRatio).toBeGreaterThan(0.99);

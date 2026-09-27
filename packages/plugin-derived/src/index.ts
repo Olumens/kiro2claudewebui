@@ -86,8 +86,8 @@ class DerivedPlugin extends BasePlugin {
       if (credits == null) return;
       const inputTokens = event.getMeta<number>('kiro.inputTokens') ?? 0;
       const outputTokens = event.getMeta<number>('kiro.outputTokens') ?? 0;
-      // Raw wire model; deriveKiroUsage → normalizeModelId owns all model-id
-      // canonicalization (dot→dash, -thinking, -YYYYMMDD) to the price-table key.
+      // 上游 id(host 的 mapModel 结果,如 claude-opus-5.5);老 host 没有这个键时退回客户端原名。
+      // 归一到价格表 key(dot→dash 等)由 deriveKiroUsage → normalizeModelId 负责。
       const model = event.getMeta<string>('kiro.pricedModel') ?? event.model;
 
       let breakdown: DerivedUsageBreakdown;

@@ -68,10 +68,16 @@ export function classifyProviderError(err: unknown): ClassifiedProviderError {
           message: 'Input is too long. Reduce the size of your messages.',
         };
       case 'quota_exhausted':
-        log.warn({ msg: 'upstream quota exhausted', status: err.kind.status });
+        // 402 + Anthropic 原生的 billing_error:SDK 不重试;上游若是 429 限流形态的额度耗尽,
+        // 转成 402 正是为了不让客户端对着下个周期才重置的额度退避重试(踩坑「额度耗尽」)。
+        log.warn({
+          msg: 'upstream quota exhausted',
+          status: err.kind.status,
+          quota_reason: err.kind.reason,
+        });
         return {
           status: 402,
-          errorType: 'api_error',
+          errorType: 'billing_error',
           message:
             'Service quota exhausted. Please try again later or contact the service administrator.',
         };

@@ -117,22 +117,31 @@ export const DUPLICATE_TOOL_RESULT_TEXT =
 // ============================================================================
 
 /**
- * 紧挨家族名的版本号,编码为 `major * 100 + minor`(4.5 → 405,5 → 500)。先认 `opus-4-5` /
- * `opus-4.5` / `opus 4.5`,再认版本在前的 `claude-3-5-sonnet` / `claude-4.7-opus`。minor 只认
- * 1–2 位,所以 `opus-5-20260720` 的 8 位日期不是 minor;没有版本号的写法(`claude-opus`)→ undefined。
+ * 紧挨家族名的版本号的两种写法:先认 `opus-4-5` / `opus-4.5` / `opus 4.5`,再认版本在前的
+ * `claude-3-5-sonnet` / `claude-4.7-opus`。minor 只认 1–2 位且后面不能再跟数字或字母,所以
+ * `opus-5-20260720` 的 8 位日期、`opus-5-1m` 的 `1m` 都不是 minor。
  */
-function claudeFamilyVersion(lower: string, family: string): number | undefined {
-  const m =
-    new RegExp(`${family}[- ]?(\\d{1,2})(?:[-.](\\d{1,2}))?(?!\\d)`).exec(lower) ??
-    new RegExp(`(?<!\\d)(\\d{1,2})(?:[-.](\\d{1,2}))?[- ]?${family}`).exec(lower);
-  if (m === null) return undefined;
-  return Number(m[1]) * 100 + Number(m[2] ?? 0);
+function versionPatterns(family: string): readonly RegExp[] {
+  return [
+    new RegExp(`${family}[- ]?(\\d{1,2})(?:[-.](\\d{1,2})(?![\\da-z]))?(?!\\d)`),
+    new RegExp(`(?<!\\d)(\\d{1,2})(?:[-.](\\d{1,2}))?[- ]?${family}`),
+  ];
+}
+
+/** 版本号编码为 `major * 100 + minor`(4.5 → 405,5 → 500);没有版本号的写法(`claude-opus`)→ undefined。 */
+function claudeFamilyVersion(lower: string, patterns: readonly RegExp[]): number | undefined {
+  for (const pattern of patterns) {
+    const m = pattern.exec(lower);
+    if (m !== null) return Number(m[1]) * 100 + Number(m[2] ?? 0);
+  }
+  return undefined;
 }
 
 interface ClaudeFamily {
   readonly name: string;
+  readonly patterns: readonly RegExp[];
   readonly versions: ReadonlyMap<number, string>;
-  readonly newest: number;
+  readonly oldest: number;
   readonly fallback: string;
 }
 
@@ -142,13 +151,15 @@ function claudeFamily(
   upstreamIds: readonly string[],
   fallback: string,
 ): ClaudeFamily {
+  const patterns = versionPatterns(name);
   const versions = new Map<number, string>();
   for (const id of upstreamIds) {
-    const version = claudeFamilyVersion(id, name);
+    const version = claudeFamilyVersion(id, patterns);
+    // 模块加载期的静态表自检:表写错了就不该启动
     if (version === undefined) throw new Error(`no ${name} version in upstream id: ${id}`);
     versions.set(version, id);
   }
-  return { name, versions, newest: Math.max(...versions.keys()), fallback };
+  return { name, patterns, versions, oldest: Math.min(...versions.keys()), fallback };
 }
 
 const CLAUDE_FAMILIES: readonly ClaudeFamily[] = [
@@ -173,13 +184,13 @@ const CLAUDE_FAMILIES: readonly ClaudeFamily[] = [
 ];
 
 /**
- * 已知版本 → 对应 id;比已知最新版本还新 → undefined(400,不把没上的新模型静默换成旧的);
- * 其余(没有版本号、更老的写法)→ 家族兜底。
+ * 已知版本 → 对应 id;没有版本号、比最老已知版本还老 → 家族兜底;其余表里没有的版本(更新的、
+ * 或夹在已知版本之间的)→ undefined(400,不把没上的模型静默换成别的版本)。
  */
 function mapClaudeFamily(lower: string, family: ClaudeFamily): string | undefined {
-  const version = claudeFamilyVersion(lower, family.name);
-  if (version === undefined) return family.fallback;
-  return family.versions.get(version) ?? (version > family.newest ? undefined : family.fallback);
+  const version = claudeFamilyVersion(lower, family.patterns);
+  if (version === undefined || version < family.oldest) return family.fallback;
+  return family.versions.get(version);
 }
 
 /**
@@ -253,7 +264,8 @@ const MODELS_WITHOUT_XHIGH: ReadonlySet<string> = new Set(['claude-sonnet-4.6'])
 /**
  * thinking 不可关的模型:上游 schema 的 `thinking.type` 只有 adaptive,显式 `{type:"disabled"}` 回 400
  * `ValidationException`(2026-09-27 直打 opus-5.5)。客户端发 `disabled` 时按 adaptive 发,而不是把
- * 必 400 的请求送上去。
+ * 必 400 的请求送上去;客户端没给 effort 时取 low——Anthropic 文档对这类模型「想关思考」给的替代写法
+ * 就是 adaptive + low,按模型默认(medium)反而比显式 low 想得更多。
  */
 const MODELS_THINKING_ALWAYS_ON: ReadonlySet<string> = new Set(['claude-opus-5.5']);
 
@@ -282,8 +294,8 @@ export function defaultEffort(mappedModelId: string | undefined): EffortLevel {
 export function resolveEffort(
   outputConfig: { effort?: string } | undefined,
   mappedModelId?: string,
+  fallback: EffortLevel = defaultEffort(mappedModelId),
 ): EffortLevel {
-  const fallback = defaultEffort(mappedModelId);
   const effort = outputConfig?.effort ?? fallback;
   return isEffortLevel(effort) ? effort : fallback;
 }
@@ -299,7 +311,8 @@ export function usesNativeReasoning(mappedModelId: string): boolean {
 
 /**
  * 本轮实际生效的 thinking,同 KAS 的默认:原生模型未提 `thinking` 按 `adaptive`;
- * `MODELS_THINKING_ALWAYS_ON` 恒 `adaptive`(客户端 `disabled` 也按 adaptive 发);非原生模型不做
+ * `MODELS_THINKING_ALWAYS_ON` 恒 `adaptive`(客户端 `disabled` 也按 adaptive 发,effort 见
+ * `buildAdditionalModelRequestFields`);非原生模型不做
  * thinking 控制,原样返回客户端的值。上游字段(`buildAdditionalModelRequestFields`)与响应侧
  * thinking 通道(`responseThinkingEnabled`)都由它推出,不得各算各的。
  */
@@ -333,7 +346,8 @@ export function responseThinkingEnabled(
  *   - 非原生模型 → undefined(不发,沿用上游默认);
  *   - `disabled` → Claude `{thinking:{type:"disabled"}}` / GPT `{reasoning:{effort:"none"}}`;
  *   - `adaptive`(含未提时的默认)→ Claude `{thinking:{type:"adaptive", display?},
- *     output_config:{effort}}` / GPT `{reasoning:{effort}}`;sonnet-4.6 无 xhigh → 降 high。
+ *     output_config:{effort}}` / GPT `{reasoning:{effort}}`;sonnet-4.6 无 xhigh → 降 high;
+ *     `MODELS_THINKING_ALWAYS_ON` 收到 `disabled` 时 effort 缺省取 low。
  */
 export function buildAdditionalModelRequestFields(
   req: Pick<MessagesRequest, 'thinking' | 'output_config'>,
@@ -345,7 +359,12 @@ export function buildAdditionalModelRequestFields(
   if (thinking?.type !== 'adaptive') {
     return isGpt ? { reasoning: { effort: 'none' } } : { thinking: { type: 'disabled' } };
   }
-  const effort = resolveEffort(req.output_config, mappedModelId);
+  // 走到这里还是 disabled,只可能是常开模型被 effectiveThinking 改成了 adaptive
+  const effort = resolveEffort(
+    req.output_config,
+    mappedModelId,
+    req.thinking?.type === 'disabled' ? 'low' : undefined,
+  );
   if (isGpt) return { reasoning: { effort } };
   const clamped = effort === 'xhigh' && MODELS_WITHOUT_XHIGH.has(mappedModelId) ? 'high' : effort;
   return {

@@ -220,6 +220,7 @@ describe('multi-agent v2 — 响应侧 namespace 字段', () => {
       inputTokens: 1,
       outputTokens: 1,
       createdAt: 0,
+      cachedTokens: 0,
       customToolNames: new Set(['exec']),
       toolNamespaces: namespaces,
     });

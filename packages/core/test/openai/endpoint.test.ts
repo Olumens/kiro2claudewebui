@@ -308,7 +308,12 @@ describe('/openai/v1 plugin usage 扩展 + /api/openai/v1 剥离', () => {
       method: 'POST',
       url: `${prefix}/chat/completions`,
       headers: { 'content-type': 'application/json', authorization: `Bearer ${API_KEY}` },
-      payload: { model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hi' }], ...body },
+      // 输入总量要大于 CACHE_READ_OVERRIDE:cached_tokens 在出口夹到 [0, prompt_tokens]
+      payload: {
+        model: 'gpt-5.6-sol',
+        messages: [{ role: 'user', content: 'hi '.repeat(40) }],
+        ...body,
+      },
     });
   }
 
@@ -361,7 +366,7 @@ describe('/openai/v1 plugin usage 扩展 + /api/openai/v1 剥离', () => {
         method: 'POST',
         url: '/openai/v1/responses',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${API_KEY}` },
-        payload: { model: 'gpt-5.6-sol', input: 'hi', stream },
+        payload: { model: 'gpt-5.6-sol', input: 'hi '.repeat(40), stream },
       });
       expect(res.statusCode).toBe(200);
       const body = stream

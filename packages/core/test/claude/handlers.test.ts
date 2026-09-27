@@ -623,7 +623,7 @@ describe('handlers: POST /claude/v1/messages - ProviderError mapping', () => {
     if (app) await app.close();
   });
 
-  it('maps quota_exhausted to 402 api_error', async () => {
+  it('maps quota_exhausted to 402 billing_error (Anthropic native, SDKs do not retry)', async () => {
     const provider = makeStubProvider({
       callApi: async () => {
         throw new ProviderError({ kind: 'quota_exhausted', status: 402 }, 'body');
@@ -638,7 +638,7 @@ describe('handlers: POST /claude/v1/messages - ProviderError mapping', () => {
     });
     expect(response.statusCode).toBe(402);
     const body = response.json() as { error: { type: string } };
-    expect(body.error.type).toBe('api_error');
+    expect(body.error.type).toBe('billing_error');
   });
 
   it('maps context_window_full to 400 invalid_request_error', async () => {

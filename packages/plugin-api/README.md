@@ -1,6 +1,6 @@
 # @kiro2claude/plugin-api
 
-kiro2claude 的插件契约。零运行时:仅类型 + 一个轻量抽象基类。插件作者依赖本包,网关 runtime(`@kiro2claude/core`)提供实现。
+kiro2claude 的插件契约。零运行时依赖:类型 + 一个轻量抽象基类 + 少量纯函数(`parseEnvBool` / `isValidPlugin` / `assertApiVersion`)。插件作者依赖本包,网关 runtime(`@kiro2claude/core`)提供实现。
 
 > 本项目不发布到 npm。获取契约:clone 本仓库后在其 pnpm workspace 内以 `"@kiro2claude/plugin-api": "workspace:*"` 引用,或参照本包 `src/` 的契约类型自行实现。
 
@@ -25,7 +25,7 @@ class HelloPlugin extends BasePlugin {
 export default new HelloPlugin();
 ```
 
-当包的 `package.json` 含以下 keyword 时,会被 host loader 发现:
+当包的 `package.json` 含以下 keyword、且装在 core 所在的 `node_modules` 第一层(即作为 core 的依赖,详见 [PLUGIN-DEVELOPMENT](../../docs/PLUGIN-DEVELOPMENT.md)「发现机制」)时,会被 host loader 发现:
 
 ```json
 {
@@ -41,8 +41,9 @@ export default new HelloPlugin();
 | `PluginContext` | host 提供的上下文:Fastify、logger、env、capabilities、hooks |
 | `HookRegistrar` | `onUsageFinish(handler)` |
 | `UsageFinishEvent` | 读上游 meta、注入扩展、覆写标准字段 |
-| `UsageLimitsProvider` | capability `'usage-limits'` —— 上游配额 |
+| `UsageLimitsProvider` / `UsageSnapshot` | capability `'usage-limits'` —— 上游配额(`limit` / `current`;`resetAt` 当前 host 不填) |
 | `BasePlugin` | 固定 apiVersion=`'1.x'` 的抽象类 |
+| `parseEnvBool` | 解析插件布尔 env(与 host 同口径 1/true/yes/on) |
 
 ## 版本管理
 

@@ -1,8 +1,9 @@
 /**
  * @kiro2claude/plugin-api — Plugin contract types.
  *
- * Zero-runtime. Only types + an abstract base class. Plugin authors depend on
- * this package; the host (@kiro2claude/core) ships the implementation.
+ * Zero runtime dependencies: types, an abstract base class and a few pure
+ * helpers (`isValidPlugin` / `assertApiVersion` / `parseEnvBool`). Plugin authors
+ * depend on this package; the host (@kiro2claude/core) ships the implementation.
  *
  * Stability: BREAKING changes to exported types are major bumps. Add new
  * optional fields freely (minor bump). Renaming or removing exported names
@@ -20,9 +21,13 @@ export interface KiroPlugin {
   readonly name: string;
   /** SemVer of this plugin. */
   readonly version: string;
-  /** Contract version this plugin targets. Loader refuses incompatible majors. */
+  /** Contract version this plugin targets. The host only accepts the literal '1.x' (`assertApiVersion`). */
   readonly apiVersion: '1.x';
-  /** Names of other plugins that must register first. Loader topo-sorts. */
+  /**
+   * Names of plugins to register before this one (loader topo-sorts). Ordering
+   * only: a missing or failed dependency is logged, not enforced; a cycle
+   * aborts discovery of all plugins.
+   */
   readonly dependsOn?: readonly string[];
   /** Called once during host startup after capabilities are ready. */
   register(ctx: PluginContext): Promise<void> | void;
@@ -41,7 +46,7 @@ export interface PluginContext {
   readonly env: NodeJS.ProcessEnv;
   /** Auth API key the host expects on incoming requests. */
   readonly apiKey: string;
-  /** Register usage-finish / lifecycle hooks. */
+  /** Register usage-finish hooks. */
   readonly registerHook: HookRegistrar;
   /**
    * Look up host-provided capabilities by name. Returns undefined if the
@@ -71,9 +76,12 @@ export interface PluginLogger {
 
 export interface HookRegistrar {
   /**
-   * Called once per upstream response finalization, before the host writes
-   * the SSE / non-stream payload. Plugins may read upstream meta and inject
-   * additional usage fields or override standard ones.
+   * Called at most once per upstream response, before the host writes the
+   * SSE / non-stream usage. Plugins may read upstream meta and inject
+   * additional usage fields or override standard ones. Also fires on upstream
+   * error paths once a metering frame arrived (so credits are still booked);
+   * changes made then never reach the wire. A throwing handler is logged and
+   * skipped.
    */
   onUsageFinish(handler: UsageFinishHook): void;
 }
@@ -86,8 +94,9 @@ export type UsageFinishHook = (event: UsageFinishEvent) => void | Promise<void>;
 
 /**
  * Capability name 'usage-limits' — exposes upstream quota snapshot.
- * Host's SingleTokenManager implements this internally; plugins consume it
- * via ctx.getCapability<UsageLimitsProvider>('usage-limits').
+ * The host adapts its token manager's GetUsageLimits (first usage breakdown)
+ * into this shape; plugins consume it via
+ * ctx.getCapability<UsageLimitsProvider>('usage-limits').
  */
 export interface UsageLimitsProvider {
   getUsageLimits(): Promise<UsageSnapshot>;
@@ -98,7 +107,7 @@ export interface UsageSnapshot {
   readonly limit: number;
   /** Credits already consumed within the window. */
   readonly current: number;
-  /** Window reset timestamp (ms since epoch). undefined if unknown. */
+  /** Window reset timestamp (ms since epoch). The current host never fills it (always undefined). */
   readonly resetAt?: number;
 }
 
@@ -172,16 +181,19 @@ export interface UsageFinishEvent {
 
   /**
    * Add a namespaced extension field to the wire payload's `usage` object.
-   * Multiple calls to the same namespace overwrite (last writer wins),
-   * so plugins should claim their own namespace (e.g. `kiro_usage`,
-   * `kiro_derived`, or vendor-prefixed for third parties).
+   * Multiple calls to the same namespace overwrite (last writer wins, across
+   * plugins too), so plugins should claim their own namespace (e.g.
+   * `kiro_metering`, `kiro_derived`, or vendor-prefixed for third parties).
+   * A namespace equal to a field already on `usage` (standard fields such as
+   * `input_tokens`, or OpenAI's `prompt_tokens_details`) is ignored — use
+   * overrideStandardField to change standard fields.
    */
   addExtension(namespace: string, value: unknown): void;
 
   /**
-   * Override one of Anthropic's standard usage fields. Reason is logged
-   * for traceability. If two plugins override the same field within a
-   * single finalization, the host emits a `warn` log identifying both.
+   * Override one of Anthropic's standard usage fields. The reason is kept
+   * for traceability: if two plugins override the same field within a single
+   * finalization, the host emits a `warn` log identifying both (with reasons).
    */
   overrideStandardField(name: StandardUsageField, value: number, reason: string): void;
 }
@@ -225,8 +237,8 @@ export function isValidPlugin(value: unknown): value is KiroPlugin {
 }
 
 /**
- * Throws if the plugin's apiVersion is not '1.x'. Host's loader calls this
- * before invoking register().
+ * Throws if the plugin's apiVersion is not '1.x'. The host calls this right
+ * before invoking register() (the loader itself only checks it is a string).
  */
 export function assertApiVersion(plugin: KiroPlugin): void {
   if (plugin.apiVersion !== '1.x') {

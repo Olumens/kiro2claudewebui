@@ -94,7 +94,7 @@ $$
 
 ## 4b. cache 比例旋钮（`KIRO2CLAUDE_CACHE_READ_RATIO`）
 
-反演分母 `(1 − ratio)` 可经此 env 覆盖；未设 = 测量默认 `0.5276`（重发探针实测，
+反演分母 `(missPremium − ratio)`(未命中溢价,只有 `KIRO_BILLING` 里的模型不为 1)中的 ratio 可经此 env 覆盖；未设 = 测量默认 `0.5276`（重发探针实测，
 活体 opus/sonnet 均 ≈0.5278）。这是**显式的展示/策略旋钮，不是重校准**——调高它让
 展示的 `cache_read` 占比变大、同时压低 `claudeEquivalentCostUsd`（cache_read 按 0.1×
 计价），wire 数字偏离上游真实计费。只接受 `[0, 1)`，`≥1` 拒绝（分母归零/变负）。

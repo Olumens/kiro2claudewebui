@@ -75,13 +75,14 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # 发布门禁:与 ci.yml 同一套检查,确保不发布坏版本。
+      # 发布门禁:与 ci.yml 同一套检查(含插件发现冒烟),确保不发布坏版本。
       # 先 build plugin-api,dependents 的 typecheck 才能拿到它的 .d.ts。
       - run: pnpm run check
       - run: pnpm --filter @kiro2claude/plugin-api run build
       - run: pnpm -r run typecheck
       - run: pnpm -r --filter '!@kiro2claude/plugin-api' run build
       - run: pnpm -r run test
+      - run: node scripts/smoke-plugin-loader.mjs
 
       # semantic-release:分析 → bump core/package.json → CHANGELOG → tag →
       # GitHub Release → docker build & push(publishCmd)。仅在有可发布

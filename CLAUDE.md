@@ -29,13 +29,13 @@ packages/core/src/
 ├── index.ts            入口;config → login → creds → SingleTokenManager → plugin-host → Fastify → 路由 → discoverPlugins
 │                       /api/{claude,openai}/v1 = 去泄漏镜像(preHandler 打 stripPluginUsage 标记)
 ├── token.ts            count_tokens 本地估算 + 远程回退
-├── model/config.ts     ★ 环境变量单一真相源
+├── model/config.ts     Config 契约 + loader;★ env 名 / 默认值 / 校验在 model/schemas/config-schema.ts
 ├── shared/             横切层(鉴权 / wire-format errors / logger / paths / reqId-ALS),不依赖 kiro claude
 ├── plugin-host/        ★ 插件契约实现:hook-bus(按注册顺序执行 onUsageFinish)/ usage-finish-event /
 │                       capability-registry / loader(keyword 扫描 + 拓扑排序)
-├── routes/             HTTP 装配层;唯一可同时 import claude 和 kiro 的地方
+├── routes/             HTTP 装配层:claude / openai / kiro / health 四组路由挂到 Fastify 作用域
 ├── kiro/               上游适配层(token-manager / client-profile / provider / retry-executor / parser);
-│                       SingleTokenManager 经 'usage-limits' capability 暴露给 plugin
+│                       SingleTokenManager 的 GetUsageLimits 由 index.ts 适配成 'usage-limits' capability 给 plugin
 └── claude/             下游兼容层
     ├── handlers.ts           路由 handler 薄胶水
     ├── converter.ts          Claude→Kiro 请求;system 拼进首条 user;末尾 user 连串 = currentMessage;不造 assistant 轮次;
@@ -49,6 +49,8 @@ packages/core/src/
     ├── error-mapper.ts       classifyProviderError + mapProviderError
     ├── models-catalog.ts     静态模型列表
     ├── stream/legacy-thinking-decoder.ts  ★ legacy `<thinking>` 文法唯一定义点,流式/非流式共用
+    ├── tool-use-sequence.ts  两个 reducer 共用的 tool_use 序列 + `parseCompletedToolInput`(「绝不回退 {}」实施点)
+    ├── reasoning-envelope.ts Claude 签名 / GPT 推理的往返信封
     └── schemas/ · request-validator.ts · websearch.ts · types.ts · converter/ · stream/
 
 openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向依赖);Chat Completions + Responses(Codex)。
@@ -66,7 +68,7 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 
 | 想看 | 真相源 |
 |---|---|
-| `KIRO2CLAUDE_*` 环境变量 | `model/schemas/config-schema.ts` + `.env.example` |
+| `KIRO2CLAUDE_*` 环境变量 | `model/schemas/config-schema.ts` + `.env.example`;唯一例外 `KIRO2CLAUDE_CLIENT_PROFILE_PATH` 直读 `process.env`(auto-capture 运行期改写它,`kiro/client-profile.ts`) |
 | Plugin 契约 / 怎么写 plugin | `packages/plugin-api/src/types.ts`;`docs/PLUGIN-DEVELOPMENT.md` + `packages/examples/echo-plugin/` |
 | 支持哪些模型 / 加模型要同改哪几处 | `claude/models-catalog.ts` + `mapModel()`;同改清单见 PITFALLS「支持哪些模型」 |
 | 原生 reasoning / context window / effort 映射 | `MODELS_WITH_NATIVE_REASONING`、`getContextWindowSize()`(GPT 窗口可由 `KIRO2CLAUDE_GPT_CONTEXT_WINDOW` 覆盖)、`effectiveThinking()`(上游字段与响应侧 thinking 通道的同一判定)→ `buildAdditionalModelRequestFields()` + `resolveEffort()` + `defaultEffort()`(`converter.ts`,落到请求顶层 `additionalModelRequestFields`,`toKiroRequest` 装配;客户端没指定时同 KAS 补 schema 默认);OpenAI `reasoning_effort` 见 `reasoningConfigFromEffort` |
@@ -79,7 +81,7 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 | 身份覆写 | `IDENTITY_OVERRIDE_DIRECTIVE` + `KIRO2CLAUDE_IDENTITY_OVERRIDE`(默认关,原因见该常量头注释)|
 | 网关往对话里塞了哪些文本 | `buildSystemPrefix` + `foldSystemIntoFirstUserMessage`(Kiro 消息层,首条 user 最前、图例之前);其余 = `converter.ts` 文件头导出常量 + `prependImageLegend` / `imagePlaceholder` |
 | 客户端中途插入的内容会不会丢 | 只走 `foldSystemMessages` + 末尾 user 连串 = 当前轮;其它 role 400 `InvalidRole`。验证工具见 manual README |
-| 上游 status → 下游 status / 容量不足三形态 | `claude/error-mapper.ts` + `shared/upstream-status.ts`;`MODEL_CAPACITY_REASONS` 头注释(`kiro/provider-error.ts`)|
+| 上游 status → 下游 status / 容量不足三形态 / 额度耗尽 | 对话:`classifyErrorBody` + `matchQuotaExhausted`(`kiro/provider-error.ts`)→ `classifyProviderError`(`claude/error-mapper.ts`);`/kiro/usage`:`translateUsageError`(`routes/kiro.ts`);`MODEL_CAPACITY_REASONS` 头注释(`kiro/provider-error.ts`)|
 | 上游 wire(kiro-cli V3 / KAS)/ fixture 升版本 | `fixtures/kiro-cli-profile.json`(`kas` / `shell` 两个身份)+ `kiro/client-profile.ts`;`scripts/capture-kiro-cli.sh`(`KIRO_KAS_ENDPOINT` 指向 mock)→ commit `fixtures/`,版本号由 `.releaserc.json` 从 fixture 派生 |
 | 重试头 | `applyRetryHeaders`(`kiro/retry-executor.ts`)唯一 owner;三个调用点与红线见 PITFALLS「重试头」;守卫 `test/kiro/retry-headers.test.ts` |
 | plugin 注入 `usage` / `kiro.*` meta 键 | `event.addExtension` / `overrideStandardField`;meta 键 = `buildKiroUsageFinishEvent`,文档 `plugin-api/src/types.ts` `getMeta` + PLUGIN-DEVELOPMENT「Meta 键」,守卫 `test/static/usage-meta-contract.test.ts`,**加键同改三处** |
@@ -87,7 +89,7 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 | 上游「说完了」还是「说到一半」 | `metadataEvent` 出现过 = 唯一信号(`kiro/model/events/base.ts`);**别用它的 `stopReason`** |
 | 流里有没有真实内容 / tool_use 没发完 | `computeHasContent`(`claude/stream.ts`);`StreamContext.hasIncompleteToolUse()`,别退回 `stop_reason === 'tool_use'` |
 | 孤儿 tool_use | `synthesizeMissingToolResults`(`claude/converter.ts`)补 isError tool_result,不删 tool_use |
-| `/api/*` 怎么剥 plugin 扩展 | `index.ts` 的 `/api/*` register + `buildClaudeUsagePayload` |
+| `/api/*` 怎么剥 plugin 扩展 | `index.ts` 的 `/api/*` register(打 `stripPluginUsage`)+ `resolvePluginUsageExtensions`(`claude/stream.ts`,Claude / OpenAI 共用的剥离单点) |
 | 链路里仍不能保证的 | README「已知限制」;别拿全绿单测当链路无损的证据 |
 | kiro-cli 重试 / web_search 执行位置 / 工具与图片 wire / Responses 字节量 / InputValidationError 排查 | PITFALLS「上游与客户端的实测事实」 |
 | 发版 / commit 规范 | `CONTRIBUTING.md`「版本与发布」「提交规范」(篇幅 + 脱敏);`.releaserc.json`、`.gitmessage` |
@@ -96,13 +98,13 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 
 ### 架构 / 插件边界
 
-- 依赖方向单向;所有 plugin(含内置)**必须**经 `@kiro2claude/plugin-api` 集成,**禁止** import core 内部模块(biome 拦截)
+- 依赖方向单向;所有 plugin(含内置)**必须**经 `@kiro2claude/plugin-api` 集成,**禁止** import core 内部模块(biome 只拦两个内置插件,其余靠 review)
 - 新增路由:core 自有放 `routes/`;plugin 用 `ctx.app.register(...)`。新增 `KIRO2CLAUDE_*` env:core 进 `config-schema.ts`,plugin 自己读 `ctx.env`
 
 ### Plugin 契约
 
 - 契约类型是 SemVer 公开 API,破坏性改动 = major bump;不暴露 kiro-specific 类型,用 capability 命名查询
-- `addExtension(namespace, value)` 命名空间所有权;`overrideStandardField(name, value, reason)` 显式 override
+- `addExtension(namespace, value)` 只加新键(同名后写覆盖,与 usage 已有字段同名的被跳过);改标准字段只能 `overrideStandardField(name, value, reason)`;`kiro.pricedModel` = `mapModel` 后的上游 id
 - `apiVersion: '1.x'` 必须匹配 host 主版本;`dependsOn` 拓扑排序,hook 注册顺序 = 调用顺序
 
 ### TypeScript / 模块系统
@@ -112,12 +114,12 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 
 ### 错误流转
 
-- 上游非 2xx → `KiroHttpError(status, msg)`;转换失败 → `ConversionError`(`UnsupportedModel` / `EmptyMessages` / `InvalidRole`)→ 400
+- 对话上游非 2xx → `RetryExecutor` 抛 `ProviderError`(`ProviderErrorKind`);token refresh / GetUsageLimits 非 2xx → `KiroHttpError(status, msg)`;转换失败 → `ConversionError`(`UnsupportedModel` / `EmptyMessages` / `InvalidRole`)→ 400
 - `ProviderErrorKind` 新增 variant 由 tsc 强制穷尽:`claude/error-mapper.ts` 用 `assertNever`,`kiro/provider-error.ts` 的 `defaultMessage` 靠结构穷尽(`kiro/` 不能 import `claude/`)
-- 408/429/503/504 原样透传(含 Retry-After);500/501/502/505+ 与 401/403 压成 502
+- 408/429/503/504 原样透传(含 Retry-After;429 声明额度耗尽 reason 的除外,见下);500/501/502/505+ 与 401/403 压成 502
 - 400 `THINKING_SIGNATURE_INVALID` → `thinking_signature_invalid`:`RetryExecutor` 剥掉全部 `reasoningContent` 重发一次(info 级),再失败 → 400 中性文案
 - ★ **例外,先于上条判**:5xx 的 body 点名容量不足 → 503 `overloaded_error`;施加点在 `retry-executor.ts` 的 5xx 分支而**非** `classifyErrorBody`,只作用于 5xx。判别子在 `MODEL_CAPACITY_REASONS` 头注释;为什么见 PITFALLS「容量不足的 5xx」
-- 402 配额判定(`isMonthlyRequestLimitBody`)**故意**宽松,**别与上条统一**;反向守卫 `test/kiro/provider-error.test.ts`
+- ★ 额度耗尽(`matchQuotaExhausted`,先于 429 分支):402 一律算,其它 4xx 只认声明的额度 reason(同 KAS)→ 402 `billing_error`;**别与上条统一**(两者误判代价相反)。守卫 `test/kiro/provider-error.test.ts` + `test/claude/quota-exhausted-e2e.test.ts`;证据见 PITFALLS「额度耗尽」
 
 ### 响应文案中性化
 
@@ -141,7 +143,7 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 
 ## 高频踩坑陷阱
 
-> 每条 = 红线 + 真相源;为什么、实测证据、复跑入口在 [docs/PITFALLS.md](./docs/PITFALLS.md) 同名条目。回指写 `踩坑「关键词」`,改标题两处同步。
+> 每条 = 红线 + 真相源;为什么、实测证据、复跑入口在 [docs/PITFALLS.md](./docs/PITFALLS.md) 同名条目,或条目里显式写出的 PITFALLS「…」(「运行时基础设施」「鉴权 · 凭据 · 构建部署」两节与 cachePoint / tool-search marker 两条一句自足,无对应条目)。回指写 `踩坑「关键词」`,改标题两处同步。
 
 ### 运行时基础设施
 
@@ -173,7 +175,7 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 ### 流式传输 · 断连 · 空流
 
 - **空流有界重试**:仅 pre-commit、最多 `KIRO2CLAUDE_EMPTY_STREAM_RETRIES` 次;确定性空流单次定案不耗预算,判据 `sawBillableWork()` 不是 `hasContent()`。红线在 `stream-handler.ts` / `stream.ts` / `empty-capture.ts` 头注释
-- ★ **截断 tool_use 必须阻止残缺调用到达客户端**:`pendingToolCalls` 收到 `isComplete` 才上 wire;参数解不出 JSON 即协议错误,**绝不回退 `{}`**;`isComplete` 必须是 boolean;Responses 映射 `incomplete`,不可改 `completed`。守卫 `test/claude/truncated-tool-use.test.ts` + `transport-integrity.test.ts`
+- ★ **截断 tool_use 必须阻止残缺调用到达客户端**:`pendingToolCalls` 收到 `isComplete` 才上 wire;参数解不出 JSON 即协议错误,**绝不回退 `{}`**(`parseCompletedToolInput`);`isComplete` 必须是 boolean;Responses 映射 `incomplete`,不可改 `completed`。守卫 `test/claude/truncated-tool-use.test.ts` + `transport-integrity.test.ts`
 - **断连计费**:默认 drain 全额计费;`KIRO2CLAUDE_ABORT_UPSTREAM_ON_DISCONNECT` 省 credit 但 `metering_lost` 恒真
 - ★ **write 背压不是断连**:`write()` 返 false 只是等 `'drain'`;存活只看 `destroyed`/`writableEnded`/抛错;`disconnect_source` 别退回单一布尔。守卫 `test/claude/backpressure.test.ts` + `test/static/sse-backpressure-contract.test.ts`
 - ★ **legacy thinking 文法**:开标签只认「行首」,两边都错过;文法与终态判定流式/非流式必须同源。真相源 `legacy-thinking-decoder.ts` 头注释;守卫 `test/claude/legacy-thinking-{decoder,nonstream}.test.ts`
@@ -191,9 +193,9 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 - ★ **Codex code mode**:工具在 `input[0]` 的 `additional_tools`,判别只看字段在不在;`functions` / `collaboration` namespace 展开与 `namespace` 写回见 `expandNamespaces` 头注释;`agent_message` 三类必转(`convertAgentMessage`);freeform 流式须缓冲到 block 结束。守卫 `test/openai/responses/subagent-wire.test.ts` + `test/static/freeform-tool-contract.test.ts`
 - **Messages hosted WebSearch**:`websearch.ts` 保留协议与失败语义,同名普通 function 不能被劫持。守卫 `test/claude/websearch-transport.test.ts`
 - **Codex 侧无法用 web search**:要支持是新功能,不是转发能解决的
-- ★ **thinking / effort 的 wire 规则**:只有 adaptive 语义(`enabled` 入口归一、`budget_tokens` 丢弃),effort 只看 `output_config.effort` 且只发在顶层 `additionalModelRequestFields`;非原生模型不做 thinking 控制;history thinking 只走 `assistantResponseMessage.reasoningContent`,带签名才发、无签名丢弃、禁止拼 `<thinking>` 文本;`THINKING_SIGNATURE_INVALID` 由 `RetryExecutor` 剥掉重发一次;顶层 `systemPrompt` 上游拒收。守卫 `test/static/no-thinking-tag-stitching.test.ts` + `test/claude/converter-reasoning-content.test.ts` + `test/kiro/retry-executor-thinking-signature.test.ts`;证据见 PITFALLS「原生 reasoning / effort / system 的 wire 真相」
+- ★ **thinking / effort 的 wire 规则**:只有 adaptive 语义(`enabled` 入口归一、`budget_tokens` 丢弃),effort 只看 `output_config.effort` 且只发在顶层 `additionalModelRequestFields`;常开模型(opus-5.5)的 `disabled` → adaptive + low;非原生模型不做 thinking 控制;history thinking 只走 `assistantResponseMessage.reasoningContent`,带签名才发、无签名丢弃、禁止拼 `<thinking>` 文本;`THINKING_SIGNATURE_INVALID` 由 `RetryExecutor` 剥掉重发一次;顶层 `systemPrompt` 上游拒收。守卫 `test/static/no-thinking-tag-stitching.test.ts` + `test/claude/converter-reasoning-content.test.ts` + `test/kiro/retry-executor-thinking-signature.test.ts`;证据见 PITFALLS「原生 reasoning / effort / system 的 wire 真相」
 - ★ **会话身份映射到 kiro-cli / 推理往返**:GPT 缓存按 conversationId 给(Claude 按内容),每请求随机 = 每轮冷价(Codex 同任务约 3.3 倍 credit);按 KAS 形态映射——会话一个 `sess_` id、用户轮次一个 agentContinuationId、subagent(Codex `thread-id` ≠ key、Claude Code `x-claude-code-agent-id`)= 独立会话(裸 UUID)+ `rootConversationId` 指父 + 子 agent 的 `agentMode`;Codex 的 `<subagent_notification>` 只在 Responses 适配层并入工具结果、不开新轮次,真相源 `resolveConversationIdentity` / `responsesSession`;GPT 推理不透明、不展示、经信封回传;隔离靠上游不存历史、信封不存网关状态且绑定 modelId。守卫 `test/claude/converter-conversation-identity.test.ts` + `test/openai/responses/{reasoning-roundtrip,subagent-notification}.test.ts` + `test/claude/opaque-gpt-reasoning.test.ts`,复跑 `test/manual/session-{isolation,concurrency}-live.mjs`
-- **derived 反演用 Kiro 的计价,不是 Anthropic 标价**:Kiro 按 rateMultiplier 计价,标价偏离倍率线的模型照标价填表会系统性低估命中,进 `KIRO_BILLING`(`plugin-derived/src/derive.ts`);新模型先跑 `test/manual/claude-rate-probe.ts` 标定,证据见 PITFALLS「支持哪些模型」
+- **derived 反演用 Kiro 的计价,不是 Anthropic 标价**:Kiro 按 rateMultiplier 计价,标价偏离倍率线的模型照标价填表会系统性低估命中,进 `KIRO_BILLING`(`plugin-derived/src/derive.ts`);未命中溢价只乘 prompt,`kiro.inputTokens` 含本轮输出;漏填价格表只会静默 `unknown_model`,守卫 `test/static/derived-price-coverage.test.ts`;新模型先跑 `test/manual/claude-rate-probe.ts` 标定,证据见 PITFALLS「支持哪些模型」
 - **GPT credit 锚定与缓存反演**:成本锚定 `credits×0.04`,缓存按 GPT 自己的公式反演(缓存价 0.1×、按 conversationId 命中;误差在可见输出估算,估多会虚报),**绝不给 GPT 填 `CLAUDE_PRICE_USD_PER_TOK`**;常数与证据在 `gptCacheDerivedBreakdown` 头注释
 
 ### 错误流转 · 容量事件诊断
@@ -202,8 +204,8 @@ openai/                 OpenAI 兼容层(import claude/kiro/shared,不被反向�
 
 ## 测试
 
-- vitest,每个 workspace 包自带 `vitest.config.ts`;pre-commit 强制 `biome check + pnpm -r typecheck + pnpm -r test + markdownlint`
-- **e2e 不进 CI**(`packages/core/test/e2e/`,消耗真实 token),也不在任何 tsconfig 里,改它要单独 tsc
+- vitest;只有 core 有 `vitest.config.ts`(排除 e2e),两个内置插件用默认配置;pre-commit 强制 `biome check + pnpm -r typecheck + pnpm -r test + markdownlint`
+- **e2e 不进 CI**(`packages/core/test/e2e/`,消耗真实 token);所有 `test/` 都不在任何 tsconfig 里、vitest 也不做类型检查,改测试要单独 tsc
 - **`test/scripts/` 测的是 shell 脚本**:假 `docker` 记录调用参数,断言命令行长什么样;不碰本机 `.env`、凭据、镜像
 - **默认测试模型 `claude-opus-5`**,只管真打上游的那几层;单测里的 `claude-opus-4-6` 是 fixture 常量,别全局替换
 - 固定测试图 `packages/core/test/fixtures/images/`:`test-small.png` 内联;`test-large.png` 超阈值走 tool_result 回传,converter 须提升到 `images`

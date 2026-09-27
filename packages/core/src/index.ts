@@ -48,12 +48,12 @@ import { initCountTokensConfig } from './token.js';
  * container's WORKDIR=/data). Nesting depth differs per layout (dev:
  * packages/core/{src,dist} → node_modules under packages/core; container:
  * /app/dist → /app), so the walk-up in shared/paths.ts does the work.
- * `KIRO2CLAUDE_PLUGIN_ROOT` overrides everything; the cwd-based path is a
- * last-resort fallback for test envs where import.meta.url is unavailable.
+ * `KIRO2CLAUDE_PLUGIN_ROOT` (`config.pluginRoot`) overrides everything; the cwd-based
+ * path is a last-resort fallback for test envs where import.meta.url is unavailable.
  */
-function resolvePluginRoot(env: NodeJS.ProcessEnv): string {
-  if (env.KIRO2CLAUDE_PLUGIN_ROOT) {
-    return path.resolve(env.KIRO2CLAUDE_PLUGIN_ROOT);
+function resolvePluginRoot(pluginRoot: string | undefined): string {
+  if (pluginRoot) {
+    return path.resolve(pluginRoot);
   }
   try {
     const from = path.dirname(fileURLToPath(import.meta.url));
@@ -209,11 +209,11 @@ async function main(): Promise<void> {
   }
 
   // 4.4. 初始化 plugin host 基础设施（HookBus + CapabilityRegistry）。
-  //      具体的第一方企业插件能力作为插件在第 8 步加载。
+  //      插件（含内置 metering / derived）在第 8 步发现并注册。
   const hookBus = new HookBus();
   const capabilities = new CapabilityRegistry();
 
-  // 暴露 'usage-limits' capability：第一方插件通过 ctx.getCapability
+  // 暴露 'usage-limits' capability：插件通过 ctx.getCapability
   // 取，避免直接依赖 SingleTokenManager 这个 kiro-specific 类。
   const usageLimitsProvider: UsageLimitsProvider = {
     async getUsageLimits() {
@@ -362,7 +362,7 @@ async function main(): Promise<void> {
   //
   // Plugin failures are isolated; the host still boots with the remaining
   // plugins. Capabilities (e.g. 'usage-limits') are already registered above.
-  const repoRoot = resolvePluginRoot(process.env);
+  const repoRoot = resolvePluginRoot(config.pluginRoot);
   // Base context shared across all plugins. `registerHook` is bound per-plugin
   // inside the loop below so hook callbacks land in the hook bus under their
   // actual plugin name — that's the only context field that varies per plugin.
@@ -411,7 +411,7 @@ async function main(): Promise<void> {
     );
   }
 
-  // 10. 启动服务器
+  // 9. 启动服务器
   const addr = `${config.host}:${config.port}`;
   const maskedKey = `${apiKey.slice(0, Math.floor(apiKey.length / 2))}***`;
 
@@ -432,7 +432,7 @@ async function main(): Promise<void> {
     if (line.length > 0) logger.info(`  ${line}`);
   }
 
-  // 11. 优雅关闭
+  // 10. 优雅关闭
   const shutdown = async () => {
     logger.info('正在关闭服务器...');
     try {

@@ -2,7 +2,9 @@ import type { UsageFinishEvent } from '@kiro2claude/plugin-api';
 import { describe, expect, it } from 'vitest';
 import {
   __testing__,
+  buildKiroUsageFinishEvent,
   createSseEvent,
+  resolveCacheReadTokens,
   type SseEvent,
   SseStateManager,
   StreamContext,
@@ -644,6 +646,62 @@ describe('SseStateManager.generateFinalEvents (hook bus shape)', () => {
     const usage = events.find((e) => e.event === 'message_delta')!.data.usage as any;
     expect(usage.input_tokens).toBe(4242);
     expect(usage.output_tokens).toBe(50);
+  });
+
+  it('extension namespaces cannot shadow fields already on usage', () => {
+    // 改标准字段只能走 overrideStandardField;同名扩展被跳过,而不是整体替换标准字段
+    const manager = new SseStateManager();
+    manager.handleMessageStart({ type: 'message_start' });
+
+    const hookEvent = makeHookEvent();
+    hookEvent._setActivePlugin('test');
+    hookEvent.addExtension('input_tokens', 1);
+    hookEvent.addExtension('cache_read_input_tokens', { bogus: true });
+    hookEvent.addExtension('vendor_ns', { ok: true });
+    const events = manager.generateFinalEvents(100, 50, hookEvent);
+    const usage = events.find((e) => e.event === 'message_delta')!.data.usage as any;
+    expect(usage.input_tokens).toBe(100);
+    expect(usage.cache_read_input_tokens).toBe(0);
+    expect(usage.vendor_ns).toEqual({ ok: true });
+  });
+});
+
+describe('resolveCacheReadTokens', () => {
+  it('clamps the plugin override into [0, prompt tokens]', () => {
+    const at = (value: number | undefined, promptTokens: number) => {
+      const hookEvent = makeHookEvent();
+      hookEvent._setActivePlugin('test');
+      if (value !== undefined)
+        hookEvent.overrideStandardField('cache_read_input_tokens', value, 't');
+      return resolveCacheReadTokens(hookEvent, promptTokens);
+    };
+    expect(at(undefined, 100)).toBe(0);
+    expect(at(40, 100)).toBe(40);
+    expect(at(500, 100)).toBe(100);
+    expect(at(-5, 100)).toBe(0);
+    expect(resolveCacheReadTokens(undefined, 100)).toBe(0);
+  });
+});
+
+describe('buildKiroUsageFinishEvent', () => {
+  it('kiro.pricedModel is the mapped upstream id; event.model stays the client name', () => {
+    const at = (model: string) =>
+      buildKiroUsageFinishEvent({
+        model,
+        inputTokens: 1,
+        outputTokens: 1,
+        inputTokensFromUpstream: true,
+        kiroMetering: undefined,
+        eventCounts: {},
+        logger: getLogger(),
+      });
+    const ev = at('claude-opus-5-5[1m]');
+    expect(ev.model).toBe('claude-opus-5-5[1m]');
+    expect(ev.getMeta('kiro.pricedModel')).toBe('claude-opus-5.5');
+    expect(at('us.anthropic.claude-opus-4-6-v1:0').getMeta('kiro.pricedModel')).toBe(
+      'claude-opus-4.6',
+    );
+    expect(at('gpt-5.6-codex').getMeta('kiro.pricedModel')).toBe('gpt-5.6-sol');
   });
 });
 

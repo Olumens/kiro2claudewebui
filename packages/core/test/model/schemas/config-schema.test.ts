@@ -438,12 +438,22 @@ describe('envToConfig', () => {
     expect(config.countTokensAuthType).toBe('x-api-key');
     expect(config.loginLicense).toBe('pro');
     expect(config.loginTimeoutMs).toBe(600_000);
+    expect(config.pluginRoot).toBeUndefined();
     // Plugin-owned config, not surfaced through core Config:
     //   meteringCounter / costMultiplier / includeKiroDerived are read by the
     //   metering / derived plugins from process.env (ctx.env) directly.
     expect('includeKiroDerived' in config).toBe(false);
     expect('meteringCounter' in config).toBe(false);
     expect('costMultiplier' in config).toBe(false);
+  });
+
+  it('maps KIRO2CLAUDE_PLUGIN_ROOT to Config.pluginRoot (blank = unset)', () => {
+    const at = (v: string) =>
+      envToConfig(
+        envSchema.parse({ KIRO2CLAUDE_API_KEY: 'k', KIRO2CLAUDE_PLUGIN_ROOT: v }) as ParsedEnv,
+      ).pluginRoot;
+    expect(at('/app')).toBe('/app');
+    expect(at('')).toBeUndefined();
   });
 
   it('maps KIRO2CLAUDE_IDENTITY_OVERRIDE to Config.identityOverride (cross-checked vs extractThinking)', () => {

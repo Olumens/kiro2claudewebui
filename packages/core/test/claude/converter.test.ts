@@ -110,6 +110,23 @@ describe('mapModel', () => {
     expect(mapModel('claude-haiku-5')).toBeUndefined();
   });
 
+  it('test_map_model_between_known_versions_undefined', () => {
+    // 回归 bug:夹在已知版本之间的名字曾掉进家族兜底,opus-5.1 被换成 4.6(连带丢掉 thinking / effort)
+    expect(mapModel('claude-opus-5-1')).toBeUndefined();
+    expect(mapModel('claude-opus-5.2')).toBeUndefined();
+    expect(mapModel('claude-opus-5-4-thinking')).toBeUndefined();
+    expect(mapModel('claude-opus-4-9')).toBeUndefined();
+    expect(mapModel('claude-sonnet-4-7')).toBeUndefined();
+  });
+
+  it('test_map_model_digit_led_suffix_not_minor', () => {
+    // 回归 bug:`-1m` 曾被读成 minor 1,opus-5-1m → 5.1、sonnet-5-1m → 400
+    expect(mapModel('claude-opus-5-1m')).toBe('claude-opus-5');
+    expect(mapModel('claude-sonnet-5-1m')).toBe('claude-sonnet-5');
+    expect(mapModel('claude-opus-4-6-1m')).toBe('claude-opus-4.6');
+    expect(mapModel('claude-opus-5-5[1m]')).toBe('claude-opus-5.5');
+  });
+
   it('test_map_model_legacy_names_keep_fallback', () => {
     // 没有版本号或比已知版本老的写法照旧走家族兜底
     expect(mapModel('claude-3-opus-20240229')).toBe('claude-opus-4.6');

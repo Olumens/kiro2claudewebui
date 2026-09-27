@@ -251,6 +251,10 @@ export const envSchema = z.object({
   KIRO2CLAUDE_LOGIN_REGION: optionalString(),
   KIRO2CLAUDE_LOGIN_LICENSE: stringWithDefault('pro'),
   KIRO2CLAUDE_LOGIN_TIMEOUT_MS: intField('KIRO2CLAUDE_LOGIN_TIMEOUT_MS', 600_000),
+  // 插件扫描根(其下 node_modules 第一层);镜像设为 /app,未设 = core 包所在目录。见 index.ts resolvePluginRoot。
+  KIRO2CLAUDE_PLUGIN_ROOT: optionalString(),
+  // KIRO2CLAUDE_CLIENT_PROFILE_PATH 故意不在这里:auto-capture 运行期改写它并刷新画像缓存
+  // (kiro/auto-capture.ts),启动期校验一次的 config 表达不了。
   // Plugin-specific env vars are intentionally NOT validated here. Plugins
   // read `ctx.env` directly via the @kiro2claude/plugin-api contract, so the
   // schema only covers core gateway flags. See docs/PLUGIN-DEVELOPMENT.md.
@@ -298,6 +302,7 @@ export function envToConfig(env: ParsedEnv): Config {
     loginRegion: env.KIRO2CLAUDE_LOGIN_REGION,
     loginLicense: env.KIRO2CLAUDE_LOGIN_LICENSE,
     loginTimeoutMs: env.KIRO2CLAUDE_LOGIN_TIMEOUT_MS,
+    pluginRoot: env.KIRO2CLAUDE_PLUGIN_ROOT,
   };
 }
 

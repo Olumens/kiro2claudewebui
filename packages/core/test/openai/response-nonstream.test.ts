@@ -60,6 +60,7 @@ describe('buildChatCompletion', () => {
       model: 'gpt-5.6-sol',
       promptTokens: 5,
       completionTokens: 1,
+      cachedTokens: 0,
     });
     expect(c.object).toBe('chat.completion');
     expect(c.model).toBe('gpt-5.6-sol');
@@ -85,6 +86,7 @@ describe('buildChatCompletion', () => {
       model: 'm',
       promptTokens: 1,
       completionTokens: 1,
+      cachedTokens: 0,
     });
     expect(c.choices[0].message.content).toBeNull();
     expect(c.choices[0].message.tool_calls).toEqual([
@@ -103,6 +105,7 @@ describe('buildChatCompletion', () => {
       model: 'm',
       promptTokens: 1,
       completionTokens: 1,
+      cachedTokens: 0,
     });
     expect(c.choices[0].message.reasoning_content).toBe('let me think');
   });
@@ -113,6 +116,7 @@ describe('buildChatCompletion', () => {
       model: 'gpt-5.6-sol',
       promptTokens: 1,
       completionTokens: 1,
+      cachedTokens: 0,
     });
     expect('reasoning_content' in c.choices[0].message).toBe(false);
   });
@@ -123,6 +127,7 @@ describe('buildChatCompletion', () => {
       model: 'm',
       promptTokens: 1,
       completionTokens: 1,
+      cachedTokens: 0,
     });
     expect(c.choices[0].finish_reason).toBe('length');
   });

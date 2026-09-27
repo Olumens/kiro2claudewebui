@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyErrorBody,
   isBearerTokenInvalidBody,
-  isMonthlyRequestLimitBody,
   matchModelCapacityReason,
+  matchQuotaExhausted,
   ProviderError,
   type ProviderErrorKind,
 } from '../../src/kiro/provider-error.js';
@@ -71,11 +71,10 @@ describe('classifyErrorBody', () => {
     expect(kind?.kind).toBe('quota_exhausted');
   });
 
-  it('does not classify quota exhausted for non-402 status', () => {
-    const body = '{"reason":"MONTHLY_REQUEST_COUNT"}';
-    // 402 with the wrong body or 400 with quota body — neither matches
-    const kind = classifyErrorBody(400, body);
-    expect(kind).toBeUndefined();
+  it('does not classify quota exhausted without a 402 or a declared usage-limit reason', () => {
+    expect(classifyErrorBody(400, '{"reason":"REQUEST_BODY_INVALID"}')).toBeUndefined();
+    // 5xx 不在配额判定范围(容量不足走 matchModelCapacityReason)
+    expect(classifyErrorBody(500, '{"reason":"MONTHLY_REQUEST_COUNT"}')).toBeUndefined();
   });
 
   it('detects context window full', () => {
@@ -96,45 +95,68 @@ describe('classifyErrorBody', () => {
   });
 });
 
-describe('isMonthlyRequestLimitBody', () => {
-  it('detects raw string match', () => {
-    expect(isMonthlyRequestLimitBody('any body with MONTHLY_REQUEST_COUNT in it')).toBe(true);
+describe('matchQuotaExhausted', () => {
+  // 形态出处:KAS SDK 的 KiroRuntimeService 错误 schema(ServiceQuotaExceededException = 402、
+  // ThrottlingException = 429)与 KAS 自己的映射;详见 docs/PITFALLS.md「额度耗尽」。
+
+  it('any 402 is quota exhausted, keeping the declared reason for the log', () => {
+    // 回归:这个 402 曾因 body 里没有 MONTHLY_REQUEST_COUNT 落到 bad_request → 400「check your payload」
+    const overage =
+      '{"__type":"com.amazon.kiro.runtimeservice#ServiceQuotaExceededException","message":"x","reason":"OVERAGE_REQUEST_LIMIT_EXCEEDED"}';
+    expect(matchQuotaExhausted(402, overage)).toEqual({ reason: 'OVERAGE_REQUEST_LIMIT_EXCEEDED' });
+    expect(matchQuotaExhausted(402, '{"reason":"MONTHLY_REQUEST_COUNT"}')).toEqual({
+      reason: 'MONTHLY_REQUEST_COUNT',
+    });
+    expect(matchQuotaExhausted(402, '{"error":{"reason":"MONTHLY_REQUEST_COUNT"}}')).toEqual({
+      reason: 'MONTHLY_REQUEST_COUNT',
+    });
+    // 不认识的 reason 照样算,原样记下
+    expect(matchQuotaExhausted(402, '{"reason":"CONVERSATION_LIMIT_EXCEEDED"}')).toEqual({
+      reason: 'CONVERSATION_LIMIT_EXCEEDED',
+    });
+    expect(matchQuotaExhausted(402, 'not json')).toEqual({ reason: undefined });
+    expect(matchQuotaExhausted(402, '')).toEqual({ reason: undefined });
   });
 
-  it('detects JSON with top-level reason', () => {
-    expect(isMonthlyRequestLimitBody('{"reason":"MONTHLY_REQUEST_COUNT"}')).toBe(true);
+  it('a 429 declaring a usage-limit reason is quota, not a retryable rate limit', () => {
+    for (const reason of [
+      'MONTHLY_REQUEST_COUNT',
+      'WEEKLY_REQUEST_COUNT',
+      'DAILY_REQUEST_COUNT',
+      'HOURLY_REQUEST_COUNT',
+      'USAGE_LIMIT_REACHED',
+      'OVERAGE_REQUEST_LIMIT_EXCEEDED',
+    ]) {
+      const body = `{"__type":"com.amazon.kiro.runtimeservice#ThrottlingException","message":"x","reason":"${reason}"}`;
+      expect(matchQuotaExhausted(429, body), reason).toEqual({ reason });
+      expect(classifyErrorBody(429, body)).toEqual({
+        kind: 'quota_exhausted',
+        status: 429,
+        reason,
+      });
+    }
+    expect(matchQuotaExhausted(400, '{"reason":"MONTHLY_REQUEST_COUNT"}')).toEqual({
+      reason: 'MONTHLY_REQUEST_COUNT',
+    });
   });
 
-  it('detects JSON with nested error.reason', () => {
-    expect(isMonthlyRequestLimitBody('{"error":{"reason":"MONTHLY_REQUEST_COUNT"}}')).toBe(true);
-  });
-
-  it('returns false for unrelated bodies', () => {
-    expect(isMonthlyRequestLimitBody('{"reason":"DAILY_REQUEST_COUNT"}')).toBe(false);
-    expect(isMonthlyRequestLimitBody('{"error":"something"}')).toBe(false);
-    expect(isMonthlyRequestLimitBody('')).toBe(false);
-  });
-
-  it('tolerates invalid JSON', () => {
-    expect(isMonthlyRequestLimitBody('not json at all')).toBe(false);
-  });
-
-  it('matches superset tokens and prose mentions (deliberately permissive)', () => {
-    // ★ Reverse guard against "unifying" this with `matchModelCapacityReason`'s
-    // declared-reason-first precedence. The cost asymmetry runs the opposite way
-    // here: a miss sends an out-of-quota user to `bad_request` → 400 "check your
-    // request payload", which is wrong *and* non-retryable in the client SDKs,
-    // whereas an over-match only says "quota exhausted" about a 402 that already
-    // failed. Only one real 402 body has ever been observed, so the scan must
-    // keep covering shapes we have not seen.
-    expect(isMonthlyRequestLimitBody('{"reason":"MONTHLY_REQUEST_COUNT_LIMIT_EXCEEDED"}')).toBe(
-      true,
-    );
+  it('keeps genuine 429 throttling retryable (declared reason only, no prose scan)', () => {
+    // ★ 反向守卫:429 上误判的代价是把可重试的限流变成硬停,所以只认声明的 reason
+    for (const reason of [
+      'INSUFFICIENT_MODEL_CAPACITY',
+      'CREDIT_CONSUMPTION_RATE_EXCEEDED',
+      'USER_REQUEST_RATE_EXCEEDED',
+      'SERVICE_REQUEST_RATE_EXCEEDED',
+    ]) {
+      expect(matchQuotaExhausted(429, `{"reason":"${reason}"}`), reason).toBeUndefined();
+    }
+    expect(matchQuotaExhausted(429, 'Too many requests')).toBeUndefined();
     expect(
-      isMonthlyRequestLimitBody(
-        '{"reason":"FREE_TIER_LIMIT","message":"MONTHLY_REQUEST_COUNT reached"}',
+      matchQuotaExhausted(
+        429,
+        '{"reason":"USER_REQUEST_RATE_EXCEEDED","message":"MONTHLY_REQUEST_COUNT"}',
       ),
-    ).toBe(true);
+    ).toBeUndefined();
   });
 });
 

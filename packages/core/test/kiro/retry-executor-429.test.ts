@@ -61,6 +61,43 @@ describe('RetryExecutor — 429 fast-path / 408+5xx pass-through', () => {
     }
   });
 
+  it('a 429 declaring a usage-limit reason is quota_exhausted, not rate_limited', async () => {
+    // 额度耗尽走 ThrottlingException 形态时,转发成 429 会让客户端对着下个周期才重置的额度退避重试
+    const body =
+      '{"__type":"com.amazon.kiro.runtimeservice#ThrottlingException","message":"x","reason":"MONTHLY_REQUEST_COUNT"}';
+    const { client, post } = makeStubAxios({
+      status: 429,
+      data: body,
+      headers: { 'retry-after': '30' },
+    });
+    const executor = new RetryExecutor(makeStubTokenManager(), client);
+
+    const err = await executor.execute(baseRequest).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    expect((err as ProviderError).kind).toEqual({
+      kind: 'quota_exhausted',
+      status: 429,
+      reason: 'MONTHLY_REQUEST_COUNT',
+    });
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('a 402 whose reason is not MONTHLY_REQUEST_COUNT is still quota_exhausted', async () => {
+    // 回归:402 + OVERAGE_REQUEST_LIMIT_EXCEEDED 曾落到 bad_request → 400「check your payload」
+    const { client } = makeStubAxios({
+      status: 402,
+      data: '{"__type":"com.amazon.kiro.runtimeservice#ServiceQuotaExceededException","message":"x","reason":"OVERAGE_REQUEST_LIMIT_EXCEEDED"}',
+    });
+    const executor = new RetryExecutor(makeStubTokenManager(), client);
+
+    const err = await executor.execute(baseRequest).catch((e: unknown) => e);
+    expect((err as ProviderError).kind).toEqual({
+      kind: 'quota_exhausted',
+      status: 402,
+      reason: 'OVERAGE_REQUEST_LIMIT_EXCEEDED',
+    });
+  });
+
   it('does NOT retry on 408 or 5xx (zero-backoff gateway philosophy)', async () => {
     const { client, post } = makeStubAxios({
       status: 503,
