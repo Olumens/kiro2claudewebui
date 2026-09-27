@@ -3,7 +3,7 @@
  *
  * 重试循环 + reduceKiroResponse + upstreamError/silentFailure + 计费 hook 全在
  * 这里;协议差异只有「用归约结果构建响应对象」一处,通过 `buildResponse` 回调注入。
- * usage 用原始 token(见回调实现),不经 buildClaudeUsagePayload。
+ * usage 用原始 token(见回调实现),不经 buildClaudeUsagePayload;plugin 覆写只取缓存命中。
  */
 
 import type { AxiosResponse } from 'axios';
@@ -19,6 +19,7 @@ import {
   buildMeteringLogFields,
   canRetryZeroWorkRejection,
   type PluginUsageExtensions,
+  resolveCacheReadTokens,
   resolvePluginUsageExtensions,
   selectEmptyUpstreamMessage,
   upstreamErrorWire,
@@ -57,6 +58,7 @@ export async function runOpenAiNonStream(
     reduced: ReducedAttempt,
     promptTokens: number,
     completionTokens: number,
+    cachedTokens: number,
     extensions: PluginUsageExtensions | undefined,
   ) => unknown,
   allowRawToolInputs?: ReadonlySet<string>,
@@ -179,6 +181,7 @@ export async function runOpenAiNonStream(
       reduced,
       finalInputTokens,
       outputTokens,
+      resolveCacheReadTokens(hookEvent),
       resolvePluginUsageExtensions(hookEvent),
     );
 

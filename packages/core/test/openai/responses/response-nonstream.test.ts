@@ -61,7 +61,12 @@ describe('buildResponsesObject', () => {
       status: 'completed',
       content: [{ type: 'output_text', text: 'pong', annotations: [] }],
     });
-    expect(r.usage).toEqual({ input_tokens: 10, output_tokens: 1, total_tokens: 11 });
+    expect(r.usage).toEqual({
+      input_tokens: 10,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 1,
+      total_tokens: 11,
+    });
     expect(r.id.startsWith('resp_')).toBe(true);
   });
 
@@ -153,10 +158,12 @@ describe('buildResponsesObject', () => {
       inputTokens: 50,
       outputTokens: 2,
       createdAt: 1,
+      cachedTokens: 45,
       extensions: ext,
     });
     expect(r.usage).toEqual({
       input_tokens: 50,
+      input_tokens_details: { cached_tokens: 45 },
       output_tokens: 2,
       total_tokens: 52,
       kiro_derived: { totalCostUsd: 0.3 },
@@ -165,19 +172,21 @@ describe('buildResponsesObject', () => {
 });
 
 describe('buildResponsesUsage', () => {
-  it('extensions 内嵌,标准三字段不变', () => {
+  it('extensions 内嵌,标准字段不变;cached_tokens 是 input_tokens 的子集', () => {
     const ext = new Map<string, unknown>([['kiro_metering', { unit: 'credit', usage: 7 }]]);
-    expect(buildResponsesUsage(20, 4, ext)).toEqual({
+    expect(buildResponsesUsage(20, 4, 16, ext)).toEqual({
       input_tokens: 20,
+      input_tokens_details: { cached_tokens: 16 },
       output_tokens: 4,
       total_tokens: 24,
       kiro_metering: { unit: 'credit', usage: 7 },
     });
   });
 
-  it('extensions=undefined → 只标准三字段(镜像端点剥离态)', () => {
-    expect(buildResponsesUsage(20, 4, undefined)).toEqual({
+  it('extensions=undefined → 只标准字段(镜像端点剥离态)', () => {
+    expect(buildResponsesUsage(20, 4, 0, undefined)).toEqual({
       input_tokens: 20,
+      input_tokens_details: { cached_tokens: 0 },
       output_tokens: 4,
       total_tokens: 24,
     });

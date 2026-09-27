@@ -2,8 +2,8 @@
  * Responses API 非流式:Claude 归约结果 → Response 对象。
  *
  * output items:reasoning(有明文思维链时走 summary 通道;推理往返开启时带 `encrypted_content`,
- * GPT 的摘要为空)+ message(有文本时)+ 每个 tool_use 一个 function_call item。usage 用原始 token(不经 buildClaudeUsagePayload);plugin 的
- * `addExtension` 扩展经 `extensions` 参内嵌进 usage(只搬扩展、不套 override,守踩坑「OpenAI prompt_tokens」)。
+ * GPT 的摘要为空)+ message(有文本时)+ 每个 tool_use 一个 function_call item。usage 用原始 token(不经 buildClaudeUsagePayload);
+ * plugin 产物只取扩展与缓存命中,取法见 resolvePluginUsageExtensions / resolveCacheReadTokens(踩坑「OpenAI prompt_tokens」)。
  */
 
 import { v4 as uuidv4 } from 'uuid';
@@ -26,10 +26,12 @@ export function responsesIncompleteDetails(
 export function buildResponsesUsage(
   inputTokens: number,
   outputTokens: number,
+  cachedTokens: number,
   extensions?: PluginUsageExtensions,
 ): ResponsesUsage {
   const usage: ResponsesUsage = {
     input_tokens: inputTokens,
+    input_tokens_details: { cached_tokens: cachedTokens },
     output_tokens: outputTokens,
     total_tokens: inputTokens + outputTokens,
   };
@@ -43,6 +45,7 @@ export function buildResponsesObject(args: {
   inputTokens: number;
   outputTokens: number;
   createdAt: number;
+  cachedTokens?: number;
   extensions?: PluginUsageExtensions;
   /** freeform 工具名(请求侧收集);命中者产 custom_tool_call 而非 function_call。 */
   customToolNames?: ReadonlySet<string>;
@@ -57,6 +60,7 @@ export function buildResponsesObject(args: {
     inputTokens,
     outputTokens,
     createdAt,
+    cachedTokens = 0,
     extensions,
     customToolNames = NO_FREEFORM_TOOLS,
     toolNamespaces = NO_TOOL_NAMESPACES,
@@ -140,7 +144,7 @@ export function buildResponsesObject(args: {
     status: incompleteDetails ? 'incomplete' : 'completed',
     model,
     output,
-    usage: buildResponsesUsage(inputTokens, outputTokens, extensions),
+    usage: buildResponsesUsage(inputTokens, outputTokens, cachedTokens, extensions),
     error: null,
     incomplete_details: incompleteDetails,
     metadata: {},

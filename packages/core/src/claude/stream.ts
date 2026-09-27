@@ -53,7 +53,7 @@ export interface ClaudeUsagePayload {
  *
  * **单一真相源**：Claude（`buildClaudeUsagePayload`）与 OpenAI 两协议共用此函数，
  * strip 语义只有一份。注意此处只解析 `addExtension` 扩展；`overrideStandardField`
- * 的标准字段覆写不经此路（OpenAI 侧刻意不套用 override，守踩坑「OpenAI prompt_tokens」）。
+ * 的标准字段覆写不经此路（OpenAI 侧只取缓存命中，见 `resolveCacheReadTokens`）。
  */
 /** plugin 注入的命名空间 usage 扩展（`addExtension` 通道）——`resolvePluginUsageExtensions` 的产物类型。 */
 export type PluginUsageExtensions = ReadonlyMap<string, unknown>;
@@ -63,6 +63,16 @@ export function resolvePluginUsageExtensions(
 ): PluginUsageExtensions | undefined {
   if (!hookEvent || getRequestContext()?.stripPluginUsage) return undefined;
   return hookEvent.getExtensions();
+}
+
+/**
+ * plugin 覆写的 `cache_read_input_tokens`（derived 由 credits 反演的缓存命中），无覆写为 0。
+ * OpenAI 两协议只取这一项、映射成 `cached_tokens`（输入总量的子集）；`input_tokens` 覆写
+ * 不取，prompt_tokens 仍是总量（踩坑「OpenAI prompt_tokens」）。它是标准字段、不带后端
+ * 身份，`/api/*` 镜像同样保留（与 `buildClaudeUsagePayload` 的 override 一致）。
+ */
+export function resolveCacheReadTokens(hookEvent: UsageFinishEventImpl | undefined): number {
+  return hookEvent?.getOverrides().get('cache_read_input_tokens') ?? 0;
 }
 
 /**

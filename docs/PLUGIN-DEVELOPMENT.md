@@ -141,7 +141,7 @@ event.overrideStandardField('input_tokens', 1234, 'reason for override');
 
 - `'http-direct'` —— HTTP 直发路径(Claude 与 OpenAI 两个协议的端点都是)
 
-OpenAI 端点只并入 `addExtension` 的扩展,不套 `overrideStandardField`(`prompt_tokens` 语义是输入总量);`/api/*` 去泄漏镜像照常触发 hook,但扩展字段不上 wire。
+OpenAI 端点并入 `addExtension` 的扩展;`overrideStandardField` 只取 `cache_read_input_tokens`,映射成 `cached_tokens`(Chat `prompt_tokens_details`、Responses `input_tokens_details`),其余覆写不套(`prompt_tokens` 语义是输入总量,缓存是它的子集);`/api/*` 去泄漏镜像照常触发 hook,扩展字段不上 wire,`cached_tokens` 是标准字段、照常保留。
 
 `event.inputTokensSource` 报告输入 token 的可靠性:
 

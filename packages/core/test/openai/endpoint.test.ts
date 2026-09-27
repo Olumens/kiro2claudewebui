@@ -248,10 +248,11 @@ describe('/openai/v1 plugin usage 扩展 + /api/openai/v1 剥离', () => {
     app = undefined;
   });
 
-  // derived 默认模式是 override-only：override input_tokens、不产 kiro_derived 扩展。
-  // 用一个 sentinel 值验证 OpenAI 端到端**只搬 addExtension、绝不套 override**(守 #16）：
-  // 回包 kiro_metering 必须在，但 prompt_tokens 必须 ≠ sentinel。
+  // derived 默认模式是 override-only：override input_tokens / cache_read、不产 kiro_derived 扩展。
+  // 用 sentinel 值验证 OpenAI 端到端**搬 addExtension + 只取 cache_read 覆写**(守 #16）：
+  // 回包 kiro_metering 必须在、cached_tokens = cache_read 覆写，但 prompt_tokens 必须 ≠ sentinel。
   const OVERRIDE_SENTINEL = 424242;
+  const CACHE_READ_OVERRIDE = 7;
 
   async function buildDualApp(frames: Buffer[]): Promise<FastifyInstance> {
     const instance = Fastify({ logger: false });
@@ -261,6 +262,11 @@ describe('/openai/v1 plugin usage 扩展 + /api/openai/v1 剥离', () => {
     });
     hookBus.registerUsageFinish('derived', (event) => {
       event.overrideStandardField('input_tokens', OVERRIDE_SENTINEL, 'test: default override mode');
+      event.overrideStandardField(
+        'cache_read_input_tokens',
+        CACHE_READ_OVERRIDE,
+        'test: default override mode',
+      );
     });
 
     instance.addHook('onRequest', (request, _reply, done) => {
@@ -314,9 +320,10 @@ describe('/openai/v1 plugin usage 扩展 + /api/openai/v1 剥离', () => {
     expect(body.usage.kiro_metering).toEqual(METERING);
     expect(body.usage.prompt_tokens).not.toBe(OVERRIDE_SENTINEL);
     expect(typeof body.usage.prompt_tokens).toBe('number');
+    expect(body.usage.prompt_tokens_details).toEqual({ cached_tokens: CACHE_READ_OVERRIDE });
   });
 
-  it('/api/openai/v1 非流式:stripPluginUsage 剥离 kiro_*,只留标准三字段', async () => {
+  it('/api/openai/v1 非流式:stripPluginUsage 剥离 kiro_*,只留标准字段(cached_tokens 保留)', async () => {
     app = await buildDualApp(framesWithMetering(METERING, 'pong'));
     const res = await post(app, '/api/openai/v1', { stream: false });
     expect(res.statusCode).toBe(200);
@@ -325,9 +332,11 @@ describe('/openai/v1 plugin usage 扩展 + /api/openai/v1 剥离', () => {
     expect(Object.keys(body.usage).sort()).toEqual([
       'completion_tokens',
       'prompt_tokens',
+      'prompt_tokens_details',
       'total_tokens',
     ]);
     expect(body.usage.prompt_tokens).not.toBe(OVERRIDE_SENTINEL);
+    expect(body.usage.prompt_tokens_details).toEqual({ cached_tokens: CACHE_READ_OVERRIDE });
   });
 
   it('/openai/v1 流式:include_usage 的 usage-only chunk 含 kiro_metering', async () => {
@@ -339,7 +348,30 @@ describe('/openai/v1 plugin usage 扩展 + /api/openai/v1 剥离', () => {
     const chunks = parseChunks(res.payload);
     const usageChunk = chunks.find((c) => (c.choices as unknown[])?.length === 0 && c.usage);
     expect(usageChunk).toBeDefined();
-    expect((usageChunk?.usage as Record<string, unknown>).kiro_metering).toEqual(METERING);
+    const usage = usageChunk?.usage as Record<string, unknown>;
+    expect(usage.kiro_metering).toEqual(METERING);
+    expect(usage.prompt_tokens).not.toBe(OVERRIDE_SENTINEL);
+    expect(usage.prompt_tokens_details).toEqual({ cached_tokens: CACHE_READ_OVERRIDE });
+  });
+
+  it('/openai/v1/responses 流式与非流式:cached_tokens 进 input_tokens_details,input_tokens 仍是总量', async () => {
+    app = await buildDualApp(framesWithMetering(METERING, 'pong'));
+    for (const stream of [false, true]) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/openai/v1/responses',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${API_KEY}` },
+        payload: { model: 'gpt-5.6-sol', input: 'hi', stream },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = stream
+        ? parseChunks(res.payload).find((c) => c.type === 'response.completed')?.response
+        : res.json();
+      const usage = (body as { usage: Record<string, unknown> }).usage;
+      expect(usage.input_tokens).not.toBe(OVERRIDE_SENTINEL);
+      expect(usage.input_tokens_details).toEqual({ cached_tokens: CACHE_READ_OVERRIDE });
+      expect(usage.kiro_metering).toEqual(METERING);
+    }
   });
 
   it('/api/openai/v1 流式:usage-only chunk 剥离 kiro_*', async () => {

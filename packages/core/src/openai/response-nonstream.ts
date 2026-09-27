@@ -3,14 +3,14 @@
  *
  * usage 直接用 handler 传入的原始 token(promptTokens = 上游 contextUsage 还原
  * 的输入总量,completionTokens = 估算输出),**不**经 buildClaudeUsagePayload
- * (避免 derived 插件的 input_tokens override 污染 prompt_tokens)。plugin 的
- * `addExtension` 扩展(kiro_metering 等)经 `extensions` 参内嵌进 usage——只搬扩展、
- * 不套 override,故 prompt_tokens 语义不受影响(踩坑「OpenAI prompt_tokens」)。extensions 由 handler 经
- * resolvePluginUsageExtensions 解析(镜像端点 stripPluginUsage 时为 undefined)。
+ * (避免 derived 插件的 input_tokens override 污染 prompt_tokens)。plugin 产物只取扩展
+ * 与缓存命中,取法见 resolvePluginUsageExtensions / resolveCacheReadTokens
+ * (踩坑「OpenAI prompt_tokens」)。
  */
 
 import { v4 as uuidv4 } from 'uuid';
 import { type ReducedAttempt, reducedReasoning } from '../claude/non-stream-reduce.js';
+import { mergeUsageExtensions, type PluginUsageExtensions } from '../claude/stream.js';
 import { mapFinishReason } from './response-stream.js';
 import type {
   ChatCompletion,
@@ -22,16 +22,16 @@ import type {
 export function buildOpenAiUsage(
   promptTokens: number,
   completionTokens: number,
-  extensions?: ReadonlyMap<string, unknown>,
+  cachedTokens: number,
+  extensions?: PluginUsageExtensions,
 ): OpenAiUsage {
   const usage: OpenAiUsage = {
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
     total_tokens: promptTokens + completionTokens,
+    prompt_tokens_details: { cached_tokens: cachedTokens },
   };
-  if (extensions) {
-    for (const [namespace, value] of extensions) usage[namespace] = value;
-  }
+  mergeUsageExtensions(usage, extensions);
   return usage;
 }
 
@@ -40,9 +40,10 @@ export function buildChatCompletion(args: {
   model: string;
   promptTokens: number;
   completionTokens: number;
+  cachedTokens?: number;
   extensions?: ReadonlyMap<string, unknown>;
 }): ChatCompletion {
-  const { reduced, model, promptTokens, completionTokens, extensions } = args;
+  const { reduced, model, promptTokens, completionTokens, cachedTokens = 0, extensions } = args;
 
   // Claude 明文 reasoning(reasoningText)或 legacy <thinking>(thinkingText)→
   // reasoning_content;GPT 加密 reasoning 时两者皆空 → 省略该字段。
@@ -75,6 +76,6 @@ export function buildChatCompletion(args: {
         logprobs: null,
       },
     ],
-    usage: buildOpenAiUsage(promptTokens, completionTokens, extensions),
+    usage: buildOpenAiUsage(promptTokens, completionTokens, cachedTokens, extensions),
   };
 }

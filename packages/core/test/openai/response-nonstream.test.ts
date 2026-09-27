@@ -23,29 +23,32 @@ function reduced(overrides: Partial<ReducedAttempt> = {}): ReducedAttempt {
 }
 
 describe('buildOpenAiUsage', () => {
-  it('三字段 + total', () => {
-    expect(buildOpenAiUsage(10, 3)).toEqual({
+  it('三字段 + total;cached_tokens 是 prompt_tokens 的子集,不从总量里扣', () => {
+    expect(buildOpenAiUsage(10, 3, 8)).toEqual({
       prompt_tokens: 10,
       completion_tokens: 3,
       total_tokens: 13,
+      prompt_tokens_details: { cached_tokens: 8 },
     });
   });
 
-  it('extensions 内嵌进 usage,标准三字段不变', () => {
+  it('extensions 内嵌进 usage,标准字段不变', () => {
     const ext = new Map<string, unknown>([['kiro_metering', { unit: 'credit', usage: 5 }]]);
-    expect(buildOpenAiUsage(10, 3, ext)).toEqual({
+    expect(buildOpenAiUsage(10, 3, 0, ext)).toEqual({
       prompt_tokens: 10,
       completion_tokens: 3,
       total_tokens: 13,
+      prompt_tokens_details: { cached_tokens: 0 },
       kiro_metering: { unit: 'credit', usage: 5 },
     });
   });
 
-  it('extensions=undefined → 只标准三字段(镜像端点剥离态)', () => {
-    expect(buildOpenAiUsage(10, 3, undefined)).toEqual({
+  it('extensions=undefined → 只标准字段(镜像端点剥离态)', () => {
+    expect(buildOpenAiUsage(10, 3, 0, undefined)).toEqual({
       prompt_tokens: 10,
       completion_tokens: 3,
       total_tokens: 13,
+      prompt_tokens_details: { cached_tokens: 0 },
     });
   });
 });
@@ -62,7 +65,12 @@ describe('buildChatCompletion', () => {
     expect(c.model).toBe('gpt-5.6-sol');
     expect(c.choices[0].message).toEqual({ role: 'assistant', content: 'pong' });
     expect(c.choices[0].finish_reason).toBe('stop');
-    expect(c.usage).toEqual({ prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 });
+    expect(c.usage).toEqual({
+      prompt_tokens: 5,
+      completion_tokens: 1,
+      total_tokens: 6,
+      prompt_tokens_details: { cached_tokens: 0 },
+    });
     expect(c.id.startsWith('chatcmpl-')).toBe(true);
   });
 
@@ -129,12 +137,14 @@ describe('buildChatCompletion', () => {
       model: 'gpt-5.6-sol',
       promptTokens: 100,
       completionTokens: 10,
+      cachedTokens: 90,
       extensions: ext,
     });
     expect(c.usage).toEqual({
       prompt_tokens: 100,
       completion_tokens: 10,
       total_tokens: 110,
+      prompt_tokens_details: { cached_tokens: 90 },
       kiro_metering: { unit: 'credit', usage: 5 },
       kiro_derived: { totalCostUsd: 0.2 },
     });

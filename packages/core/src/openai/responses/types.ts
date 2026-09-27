@@ -183,10 +183,12 @@ export interface ResponsesRequest {
 
 export interface ResponsesUsage {
   input_tokens: number;
+  /** `cached_tokens` ⊆ input_tokens,来自 plugin 的缓存反演(见 `resolveCacheReadTokens`)。 */
+  input_tokens_details: { cached_tokens: number };
   output_tokens: number;
   total_tokens: number;
-  // plugin 注入的命名空间扩展字段（`kiro_metering` / `kiro_derived`）。标准三字段
-  // 恒为 number（显式声明优先）；索引签名只为 `addExtension` 的扩展开门。Codex serde
+  // plugin 注入的命名空间扩展字段（`kiro_metering` / `kiro_derived`）。标准字段
+  // 以上方显式声明为准；索引签名只为 `addExtension` 的扩展开门。Codex serde
   // 忽略未知字段，安全。
   [key: string]: unknown;
 }

@@ -94,7 +94,7 @@ Kiro 逐账号灰度,还停在 272K 的账号把 `KIRO2CLAUDE_GPT_CONTEXT_WINDOW
 
 ### OpenAI prompt_tokens
 
-`buildClaudeUsagePayload` 会应用 derived 插件的 `input_tokens` 覆写(缓存拆分语义),而 OpenAI `prompt_tokens` 是**输入总量(含缓存)**。故 `openai/` usage 必须直接读 reducer 原始 `contextInputTokens ?? inputTokens` 与 `outputTokens`、绕过 `buildClaudeUsagePayload`;计费 hook 仍跑,插件的 `overrideStandardField` 不套到标准字段上,`addExtension` 的 `kiro_*` 扩展照常并入(经 `resolvePluginUsageExtensions`,`/api/*` 镜像剥掉)。
+`buildClaudeUsagePayload` 会应用 derived 插件的 `input_tokens` 覆写(缓存拆分语义),而 OpenAI `prompt_tokens` 是**输入总量(含缓存)**。故 `openai/` usage 必须直接读 reducer 原始 `contextInputTokens ?? inputTokens` 与 `outputTokens`、绕过 `buildClaudeUsagePayload`;计费 hook 仍跑,`addExtension` 的 `kiro_*` 扩展照常并入(经 `resolvePluginUsageExtensions`,`/api/*` 镜像剥掉)。插件覆写只取 `cache_read_input_tokens` 一项(`resolveCacheReadTokens`),映射成 OpenAI 的 `cached_tokens`——它在 OpenAI 语义里本来就是 `prompt_tokens` 的子集,与 derived 的恒等式 `input + cache_read == 总量` 同口径;`input_tokens` 覆写仍不套。早先连这一项也不取,GPT 走 OpenAI 协议时 derived 反演出的命中全部丢在网关里,Codex 看到的缓存恒为 0。
 
 ### Codex 只说 Responses
 
