@@ -33,7 +33,7 @@ packages/core/src/
 ├── shared/             横切层(鉴权 / wire-format errors / logger / paths / reqId-ALS),不依赖 kiro claude
 ├── plugin-host/        ★ 插件契约实现:hook-bus(按注册顺序执行 onUsageFinish)/ usage-finish-event /
 │                       capability-registry / loader(keyword 扫描 + 拓扑排序)
-├── routes/             HTTP 装配层:claude / openai / kiro / health 四组路由挂到 Fastify 作用域
+├── routes/             HTTP 装配层:claude / openai / kiro / health / webui 五组路由挂到 Fastify 作用域
 ├── kiro/               上游适配层(token-manager / client-profile / provider / retry-executor / parser);
 │                       SingleTokenManager 的 GetUsageLimits 由 index.ts 适配成 'usage-limits' capability 给 plugin
 └── claude/             下游兼容层
