@@ -67,6 +67,8 @@ curl -s http://127.0.0.1:8080/claude/v1/messages \
   | jq '.content[0].text'
 ```
 
+浏览器 Web UI 入口：`http://127.0.0.1:8080/webui`。页面本身免鉴权；发送请求前需在页面输入同一个 `KIRO2CLAUDE_API_KEY`（仅保存在页面内存，默认不持久化）。
+
 ## HTTP 路由
 
 core 的接口用 `KIRO2CLAUDE_API_KEY` 鉴权(`/`、`/health` 除外);插件路由由插件自己用 `ctx.apiKey` 鉴权。
@@ -74,6 +76,7 @@ core 的接口用 `KIRO2CLAUDE_API_KEY` 鉴权(`/`、`/health` 除外);插件路
 | 路径 | 方法 | 说明 |
 |---|---|---|
 | `/health` | GET | liveness 探针(免鉴权) |
+| `/webui` | GET | 内置浏览器聊天界面(MVP) |
 | `/claude/v1/models` | GET | Claude 模型列表 |
 | `/claude/v1/messages` | POST | Claude 消息接口(流式 / Vision / 工具调用 / thinking) |
 | `/claude/v1/messages/count_tokens` | POST | Token 计数 |
@@ -105,6 +108,20 @@ docker logs -f kiro2claude   # 跟随日志,浏览器打开 device flow URL 完�
 ```
 
 设了 `KIRO2CLAUDE_LOGIN_START_URL` 即容器免交互登录:首次启动在日志打出 device flow URL。本地构建用 `./scripts/docker-build.sh -t kiro2claude`。
+
+> Web UI 已内置在 core 中，开发模式(`pnpm dev`)和 Docker 镜像都可直接访问 `/webui`，不需要额外启动前端服务。
+
+## Web UI(MVP) 使用说明
+
+1. 打开 `/webui`，输入 API key，点击「设置 Key」后加载模型。
+2. 选择模型并发送消息（支持 Ctrl/Cmd + Enter 快捷发送）。
+3. 点击「停止」可中断当前生成；点击「清空会话」可清空当前页面会话历史。
+
+实现说明与限制：
+
+- UI 请求固定走 `/api/claude/v1/models` 与 `/api/claude/v1/messages`（去泄漏镜像路径）。
+- 流式显示只展示文本增量；`tool_use` / `thinking` / `redacted_thinking` 等结构化块不会直接渲染在聊天窗口。
+- 当前为单会话内存态：不支持多会话持久化、文件上传、完整工具调用交互可视化。
 
 ## 插件
 

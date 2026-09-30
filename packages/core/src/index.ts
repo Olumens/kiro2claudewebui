@@ -30,6 +30,7 @@ import { registerClaudeRoutes } from './routes/claude.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerKiroRoutes } from './routes/kiro.js';
 import { registerOpenAiRoutes } from './routes/openai.js';
+import { registerWebUiRoutes } from './routes/webui.js';
 import { getLogger, logger } from './shared/logger.js';
 import { findUpwards } from './shared/paths.js';
 import {
@@ -282,6 +283,7 @@ async function main(): Promise<void> {
   // 作用域内的 preHandler 只影响该作用域内的路由，所以 health（无鉴权）
   // 和 Claude/Kiro（有鉴权）之间是互不影响的。
   await app.register(registerHealthRoutes);
+  await app.register(registerWebUiRoutes);
 
   // 两组下游兼容路由共用同一套 handler 依赖，只在 /api 作用域多打一个请求级
   // 标记（见下）——所以 deps 抽成一个 const 复用，避免两处漂移。
