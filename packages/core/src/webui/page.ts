@@ -1,7 +1,7 @@
 import { createWebUiStreamState, reduceClaudeSseData } from './stream-adapter.js';
 
 function escapeForTemplateLiteral(source: string): string {
-  return source.replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
+  return source.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
 }
 
 function buildScript(): string {
